@@ -199,6 +199,7 @@
                         :id           true
                         :last_name    "User"
                         :date_joined  true
+                        :type         :personal
                         :common_name  "New User"}
                        (-> (mt/boolean-ids-and-timestamps [new-user])
                            first
@@ -234,6 +235,7 @@
                        :id           true
                        :last_name    nil
                        :date_joined  true
+                       :type         :personal
                        :common_name  "newuser@metabase.com"}]
                      (->> (mt/boolean-ids-and-timestamps (t2/select User :email "newuser@metabase.com"))
                           (map #(dissoc % :last_login)))))))
@@ -253,6 +255,7 @@
                        :id           true
                        :last_name    "User"
                        :date_joined  true
+                       :type         :personal
                        :common_name  "New User"}]
                      (->> (mt/boolean-ids-and-timestamps (t2/select User :email "newuser@metabase.com"))
                           (map #(dissoc % :last_login))))))))))))
