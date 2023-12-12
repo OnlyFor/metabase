@@ -159,11 +159,13 @@
 
 (defmethod driver/describe-table :bigquery-cloud-sdk
   [_ database {table-name :name, dataset-id :schema}]
-  {:schema dataset-id
-   :name   table-name
-   :fields (-> (.. (get-table database dataset-id table-name) getDefinition getSchema)
-               table-schema->metabase-field-info
-               set)})
+  (let [table (get-table database dataset-id table-name)]
+    {:schema         dataset-id
+     :name           table-name
+     :fields         (-> (.. table getDefinition getSchema)
+                         table-schema->metabase-field-info
+                         set)
+     :require-filter (.getRequirePartitionFilter table)}))
 
 (defn- get-field-parsers [^Schema schema]
   (let [default-parser (get-method bigquery.qp/parse-result-of-type :default)]

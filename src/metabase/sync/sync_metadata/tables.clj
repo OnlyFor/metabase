@@ -147,20 +147,20 @@
                        :active true}
                 {:active false})))
 
-(mu/defn ^:private update-table-description!
-  "Update description for any `changed-tables` belonging to `database`."
+(mu/defn ^:private update-table!
+  "Update metadata for any `changed-tables` belonging to `database`."
   [database       :- i/DatabaseInstance
    changed-tables :- [:set i/DatabaseMetadataTable]]
-  (log/info "Updating description for tables:"
+  (log/info "Updating metadata for tables:"
             (for [table changed-tables]
               (sync-util/name-for-logging (mi/instance Table table))))
-  (doseq [{schema :schema, table-name :name, description :description} changed-tables]
-    (when-not (str/blank? description)
-      (t2/update! Table {:db_id       (u/the-id database)
-                         :schema      schema
-                         :name        table-name
-                         :description nil}
-                  {:description description}))))
+  #_(doseq [{schema :schema, table-name :name, description :description :as changed-table} changed-tables]
+      (when-not (str/blank? description)
+        (t2/update! Table {:db_id       (u/the-id database)
+                           :schema      (:schema changed-table)
+                           :name        (:name changed-table)
+                           :description nil}
+                    {:description description}))))
 
 (mu/defn ^:private table-set :- [:set i/DatabaseMetadataTable]
   "So there exist tables for the user and metabase metadata tables for internal usage by metabase.
@@ -195,7 +195,7 @@
          [new-tables old-tables] (data/diff
                                   (strip-desc db-tables)
                                   (strip-desc our-metadata))
-         [changed-tables]        (data/diff db-tables our-metadata)]
+         [changed-tables]        (data/diff #pp db-tables #pp our-metadata)]
      ;; update database metadata from database
      (when (some? (:version db-metadata))
        (sync-util/with-error-handling (format "Error creating/reactivating tables for %s"
@@ -212,9 +212,9 @@
          (retire-tables! database old-tables)))
 
      ;; update description for changed tables
-     (when (seq changed-tables)
+     (when #p (seq changed-tables)
        (sync-util/with-error-handling (format "Error updating table description for %s" (sync-util/name-for-logging database))
-         (update-table-description! database changed-tables)))
+         (update-table! database changed-tables)))
 
      ;; update native download perms for all groups if any tables were added or removed
      (when (or (seq new-tables) (seq old-tables))
@@ -224,3 +224,5 @@
 
      {:updated-tables (+ (count new-tables) (count old-tables))
       :total-tables   (count our-metadata)})))
+
+#_(data/diff #{{:a 1 :b 2}} #{{:a 1 :b 3}})

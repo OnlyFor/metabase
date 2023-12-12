@@ -11,7 +11,9 @@
    [:name   ::lib.schema.common/non-blank-string]
    [:schema [:maybe ::lib.schema.common/non-blank-string]]
    ;; `:description` in this case should be a column/remark on the Table, if there is one.
-   [:description {:optional true} [:maybe :string]]])
+   [:description {:optional true} [:maybe :string]]
+   ;; whether a table require a filter to be able to query, currently only used for BigQuery
+   [:require-filter {:optional true} [:maybe :boolean]]])
 
 (def DatabaseMetadataTable
   "Schema for the expected output of `describe-database` for a Table."
@@ -51,10 +53,10 @@
 
 (mr/def ::TableMetadata
   [:map
-   [:name                         ::lib.schema.common/non-blank-string]
-   [:schema                       [:maybe ::lib.schema.common/non-blank-string]]
-   [:fields                       [:set TableMetadataField]]
-   [:description {:optional true} [:maybe :string]]])
+   [:name                            ::lib.schema.common/non-blank-string]
+   [:schema                          [:maybe ::lib.schema.common/non-blank-string]]
+   [:fields                          [:set TableMetadataField]]
+   [:description    {:optional true} [:maybe :string]]])
 
 (def TableMetadata
   "Schema for the expected output of [[metabase.driver/describe-table]]."
