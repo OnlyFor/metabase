@@ -2,10 +2,14 @@ import { useRef, useState } from "react";
 
 import { Flex, Text, Box, NavLink, ScrollArea } from "metabase/ui";
 import { Icon } from "metabase/core/components/Icon";
+import { getIcon } from "../../utils";
 
-import { entityForObject } from "metabase/lib/schema";
-import type { PickerState } from "./types";
-import { PickerColumn, ListBox } from "./EntityPicker.styled";
+import type { PickerState } from "../../types";
+import {
+  HorizontalScrollBox,
+  PickerColumn,
+  ListBox,
+} from "./NestedItemPicker.styled";
 
 interface NestedItemPickerProps<FolderType, ItemType> {
   onFolderSelect: (folder?: FolderType) => Promise<any[]>;
@@ -58,19 +62,8 @@ export function NestedItemPicker({
   };
 
   return (
-    <Box
-      style={{
-        height: "100%",
-        overflowX: "auto",
-      }}
-      ref={containerRef}
-    >
-      <Flex
-        style={{
-          width: "fit-content",
-          height: "100%",
-        }}
-      >
+    <HorizontalScrollBox h="100%" ref={containerRef}>
+      <Flex h="100%" w="fit-content">
         {stack.map((level, levelIndex) => (
           <ListBox key={JSON.stringify(level).slice(0, 255)}>
             <ItemList
@@ -82,7 +75,7 @@ export function NestedItemPicker({
           </ListBox>
         ))}
       </Flex>
-    </Box>
+    </HorizontalScrollBox>
   );
 }
 
@@ -141,8 +134,3 @@ function ItemList({
     </ScrollArea>
   );
 }
-
-const getIcon = item => {
-  const entity = entityForObject(item);
-  return entity?.objectSelectors?.getIcon?.(item)?.name || "table";
-};
