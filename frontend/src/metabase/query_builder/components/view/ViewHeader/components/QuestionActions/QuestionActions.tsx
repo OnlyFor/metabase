@@ -1,9 +1,10 @@
 import type { ChangeEvent } from "react";
-import { useCallback, useState, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import { t } from "ttag";
 
 import { useSetting } from "metabase/common/hooks";
 import EntityMenu from "metabase/components/EntityMenu";
+import { UploadInput } from "metabase/components/upload";
 import BookmarkToggle from "metabase/core/components/BookmarkToggle";
 import Button from "metabase/core/components/Button";
 import Tooltip from "metabase/core/components/Tooltip";
@@ -18,6 +19,7 @@ import {
 } from "metabase/plugins";
 import { softReloadCard } from "metabase/query_builder/actions";
 import { trackTurnIntoModelClicked } from "metabase/query_builder/analytics";
+import type { QueryModalType } from "metabase/query_builder/constants";
 import { MODAL_TYPES } from "metabase/query_builder/constants";
 import { uploadFile } from "metabase/redux/uploads";
 import { getUserIsAdmin } from "metabase/selectors/user";
@@ -28,10 +30,10 @@ import {
   checkCanBeModel,
   checkDatabaseCanPersistDatasets,
 } from "metabase-lib/v1/metadata/utils/models";
+import type { DatasetEditorTab, QueryBuilderMode } from "metabase-types/store";
 import { UploadMode } from "metabase-types/store/upload";
 
-import { canUploadToQuestion } from "../../../../../selectors";
-import { ViewHeaderIconButtonContainer } from "../../ViewHeader.styled";
+import { ViewHeaderIconButtonContainer } from "../../ViewTitleHeader.styled";
 
 import {
   QuestionActionsDivider,
@@ -51,11 +53,14 @@ interface Props {
   isBookmarked: boolean;
   isShowingQuestionInfoSidebar: boolean;
   handleBookmark: () => void;
-  onOpenModal: (modalType: string) => void;
+  onOpenModal: (modalType: QueryModalType) => void;
   question: Question;
   setQueryBuilderMode: (
-    mode: string,
-    opt: { datasetEditorTab: string },
+    mode: QueryBuilderMode,
+    opts?: {
+      shouldUpdateUrl?: boolean;
+      datasetEditorTab?: DatasetEditorTab;
+    },
   ) => void;
   turnDatasetIntoQuestion: () => void;
   onInfoClick: () => void;
@@ -75,7 +80,6 @@ export const QuestionActions = ({
 }: Props) => {
   const [uploadMode, setUploadMode] = useState<UploadMode>(UploadMode.append);
   const isMetabotEnabled = useSetting("is-metabot-enabled");
-  const canUpload = useSelector(canUploadToQuestion(question));
 
   const isModerator = useSelector(getUserIsAdmin) && question.canWrite?.();
 
@@ -89,10 +93,12 @@ export const QuestionActions = ({
 
   const isQuestion = question.type() === "question";
   const isModel = question.type() === "model";
+  const isMetric = question.type() === "metric";
+  const isModelOrMetric = isModel || isMetric;
   const canWrite = question.canWrite();
   const isSaved = question.isSaved();
   const database = question.database();
-  const canAppend = canUpload && canWrite && !!question._card.based_on_upload;
+  const canAppend = canWrite && !!question._card.based_on_upload;
 
   const canPersistDataset =
     PLUGIN_MODEL_PERSISTENCE.isModelLevelPersistenceEnabled() &&
@@ -144,14 +150,17 @@ export const QuestionActions = ({
     ),
   );
 
-  if (canWrite && isModel) {
-    extraButtons.push(
-      {
-        title: t`Edit query definition`,
+  if (canWrite) {
+    if (isModelOrMetric) {
+      extraButtons.push({
+        title: isMetric ? t`Edit metric definition` : t`Edit query definition`,
         icon: "notebook",
         action: handleEditQuery,
-      },
-      {
+      });
+    }
+
+    if (isModel) {
+      extraButtons.push({
         title: (
           <div>
             {t`Edit metadata`} <StrengthIndicator dataset={question} />
@@ -159,8 +168,8 @@ export const QuestionActions = ({
         ),
         icon: "label",
         action: handleEditMetadata,
-      },
-    );
+      });
+    }
   }
 
   if (canPersistDataset) {
@@ -223,8 +232,8 @@ export const QuestionActions = ({
 
   if (canWrite) {
     extraButtons.push({
-      title: t`Archive`,
-      icon: "archive",
+      title: t`Move to trash`,
+      icon: "trash",
       action: () => onOpenModal(MODAL_TYPES.ARCHIVE),
       testId: ARCHIVE_TESTID,
     });
@@ -244,12 +253,14 @@ export const QuestionActions = ({
   const handleFileUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file && question._card.based_on_upload) {
-      uploadFile({
-        file,
-        tableId: question._card.based_on_upload,
-        reloadQuestionData: true,
-        uploadMode,
-      })(dispatch);
+      dispatch(
+        uploadFile({
+          file,
+          tableId: question._card.based_on_upload,
+          reloadQuestionData: true,
+          uploadMode,
+        }),
+      );
 
       // reset the file input so that subsequent uploads of the same file trigger the change handler
       if (fileInputRef.current?.value) {
@@ -261,13 +272,15 @@ export const QuestionActions = ({
   return (
     <>
       <QuestionActionsDivider />
-      <ViewHeaderIconButtonContainer>
-        <BookmarkToggle
-          onCreateBookmark={handleBookmark}
-          onDeleteBookmark={handleBookmark}
-          isBookmarked={isBookmarked}
-        />
-      </ViewHeaderIconButtonContainer>
+      {!question.isArchived() && (
+        <ViewHeaderIconButtonContainer>
+          <BookmarkToggle
+            onCreateBookmark={handleBookmark}
+            onDeleteBookmark={handleBookmark}
+            isBookmarked={isBookmarked}
+          />
+        </ViewHeaderIconButtonContainer>
+      )}
       <Tooltip tooltip={t`More info`}>
         <ViewHeaderIconButtonContainer>
           <Button
@@ -282,13 +295,10 @@ export const QuestionActions = ({
       </Tooltip>
       {canAppend && (
         <>
-          <input
-            type="file"
-            accept="text/csv,text/tab-separated-values"
+          <UploadInput
             id="upload-file-input"
             ref={fileInputRef}
             onChange={handleFileUpload}
-            style={{ display: "none" }}
           />
           <Tooltip tooltip={t`Upload data to this model`}>
             <ViewHeaderIconButtonContainer>
@@ -322,12 +332,12 @@ export const QuestionActions = ({
           </Tooltip>
         </>
       )}
-      {extraButtons.length > 0 && (
+      {extraButtons.length > 0 && !question.isArchived() && (
         <EntityMenu
-          triggerAriaLabel={t`Move, archive, and more...`}
+          triggerAriaLabel={t`Move, trash, and more...`}
           items={extraButtons}
           triggerIcon="ellipsis"
-          tooltip={t`Move, archive, and more...`}
+          tooltip={t`Move, trash, and more...`}
         />
       )}
     </>

@@ -8,6 +8,7 @@ import {
   setupCollectionByIdEndpoint,
   setupCollectionsEndpoints,
   setupCollectionItemsEndpoint,
+  setupRecentViewsAndSelectionsEndpoints,
 } from "__support__/server-mocks";
 import { mockSettings } from "__support__/settings";
 import {
@@ -65,10 +66,8 @@ const setup = async (
   question: Question,
   originalQuestion: Question | null = null,
   {
-    isCachingEnabled,
     collectionEndpoints,
   }: {
-    isCachingEnabled?: boolean;
     collectionEndpoints?: CollectionEndpoints;
   } = {},
 ) => {
@@ -82,9 +81,15 @@ const setup = async (
     fetchMock.get("path:/api/collection", TEST_COLLECTIONS);
     fetchMock.get("path:/api/collection/root", ROOT_TEST_COLLECTION);
     setupCollectionByIdEndpoint({ collections: [BOBBY_TEST_COLLECTION] });
+    setupCollectionItemsEndpoint({
+      collection: BOBBY_TEST_COLLECTION,
+      collectionItems: [],
+    });
   }
 
-  const settings = mockSettings({ "enable-query-caching": isCachingEnabled });
+  setupRecentViewsAndSelectionsEndpoints([]);
+
+  const settings = mockSettings();
 
   const state = createMockState({
     settings,
@@ -153,8 +158,6 @@ function getQuestion({
     metadata,
   );
 }
-
-const EXPECTED_DIRTY_SUGGESTED_NAME = "Orders, Count, 1 row";
 
 function getDirtyQuestion(originalQuestion: Question) {
   return originalQuestion
@@ -355,7 +358,7 @@ describe("SaveQuestionModal", () => {
       await userEvent.click(screen.getByText("Save as new question"));
 
       expect(screen.getByLabelText("Name")).toHaveValue(
-        EXPECTED_DIRTY_SUGGESTED_NAME,
+        `${CARD.name} - Modified`,
       );
       expect(screen.getByLabelText("Description")).toHaveValue(
         CARD.description,
@@ -380,7 +383,9 @@ describe("SaveQuestionModal", () => {
 
       const newQuestion = call[0];
       expect(newQuestion.id()).toBeUndefined();
-      expect(newQuestion.displayName()).toBe(EXPECTED_DIRTY_SUGGESTED_NAME);
+      expect(newQuestion.displayName()).toBe(
+        `${originalQuestion.displayName()} - Modified`,
+      );
       expect(newQuestion.description()).toBe("Example");
       expect(newQuestion.collectionId()).toBe(null);
     });
@@ -652,7 +657,7 @@ describe("SaveQuestionModal", () => {
 
     describe("OSS", () => {
       it("is not shown", async () => {
-        await setup(question, null, { isCachingEnabled: true });
+        await setup(question, null);
         expect(screen.queryByText("More options")).not.toBeInTheDocument();
         expect(
           screen.queryByText("Cache all question results for"),
@@ -666,7 +671,7 @@ describe("SaveQuestionModal", () => {
       });
 
       it("is not shown", async () => {
-        await setup(question, null, { isCachingEnabled: true });
+        await setup(question, null);
         expect(screen.queryByText("More options")).not.toBeInTheDocument();
         expect(
           screen.queryByText("Cache all question results for"),
@@ -733,7 +738,7 @@ describe("SaveQuestionModal", () => {
       });
     });
 
-    afterAll(() => {
+    afterEach(() => {
       jest.restoreAllMocks();
     });
 
@@ -761,6 +766,10 @@ describe("SaveQuestionModal", () => {
           },
         });
         setupCollectionByIdEndpoint({ collections: [COLLECTION.PARENT] });
+        setupCollectionItemsEndpoint({
+          collection: BOBBY_TEST_COLLECTION,
+          collectionItems: [],
+        });
       });
       it("should create collection inside nested folder", async () => {
         await userEvent.click(collDropdown());

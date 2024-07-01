@@ -12,7 +12,7 @@ import Select, { Option } from "metabase/core/components/Select";
 import AdminS from "metabase/css/admin.module.css";
 import ButtonsS from "metabase/css/components/buttons.module.css";
 import CS from "metabase/css/core/index.css";
-import { uuid } from "metabase/lib/utils";
+import { uuid } from "metabase/lib/uuid";
 import { SettingsApi, GeoJSONApi } from "metabase/services";
 import LeafletChoropleth from "metabase/visualizations/components/LeafletChoropleth";
 
@@ -96,14 +96,14 @@ export default class CustomGeoJSONWidget extends Component {
 
       for (const feature of geoJson.features) {
         if (!feature.properties) {
-          throw t`Invalid custom GeoJSON: feature is misssing properties`;
+          throw t`Invalid custom GeoJSON: feature is missing properties`;
         }
       }
     }
 
     if (geoJson.type === "Feature") {
       if (!geoJson.properties) {
-        throw t`Invalid custom GeoJSON: feature is misssing properties`;
+        throw t`Invalid custom GeoJSON: feature is missing properties`;
       }
     }
   };
@@ -192,7 +192,7 @@ export default class CustomGeoJSONWidget extends Component {
         />
         {this.state.map ? (
           <Modal wide>
-            <div className="p4">
+            <div className={CS.p4}>
               <EditMap
                 map={this.state.map}
                 originalMap={this.state.originalMap}
@@ -226,10 +226,10 @@ const ListMaps = ({ maps, onEditMap, onDeleteMap }) => (
           .filter(map => !map.builtin)
           .map(map => (
             <tr key={map.id}>
-              <td className="cursor-pointer" onClick={() => onEditMap(map)}>
+              <td className={CS.cursorPointer} onClick={() => onEditMap(map)}>
                 {map.name}
               </td>
-              <td className="cursor-pointer" onClick={() => onEditMap(map)}>
+              <td className={CS.cursorPointer} onClick={() => onEditMap(map)}>
                 <Ellipsified style={{ maxWidth: 600 }}>{map.url}</Ellipsified>
               </td>
               <td className={AdminS.TableActions}>
@@ -298,16 +298,18 @@ const GeoJsonPropertySelect = ({ value, onChange, geoJson }) => {
 const SettingContainer = ({
   name,
   description,
-  className = "py1",
+  className = CS.py1,
   children,
 }) => (
   <div className={className}>
     {name && (
-      <div className={cx("text-medium", CS.textBold, CS.textUppercase, "my1")}>
+      <div className={cx(CS.textMedium, CS.textBold, CS.textUppercase, CS.my1)}>
         {name}
       </div>
     )}
-    {description && <div className="text-medium my1">{description}</div>}
+    {description && (
+      <div className={cx(CS.textMedium, CS.my1)}>{description}</div>
+    )}
     {children}
   </div>
 );
@@ -434,7 +436,7 @@ const EditMap = ({
       </div>
     </div>
     <div className={cx(CS.py1, CS.flex)}>
-      <div className="ml-auto">
+      <div className={CS.mlAuto}>
         <button
           className={ButtonsS.Button}
           onClick={onCancel}

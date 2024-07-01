@@ -1,11 +1,8 @@
 (ns metabase.query-processor.middleware.cache
   "Middleware that returns cached results for queries when applicable.
 
-  If caching is enabled (`enable-query-caching` is `true`) cached results will be returned for Cards if possible.
-  There's a global default TTL defined by the setting `query-caching-default-ttl`, but individual Cards can override
-  this value with custom TTLs with a value for `:cache_ttl`.
-
-  For all other queries, caching is skipped.
+  If query caching is enabled, cache strategy has been passed and it's not a `{:type :nocache}`, THEN cached results
+  will be returned for Cards if available or stored if applicable. For all other queries, caching is skipped.
 
   The default backend is `db`, which uses the application database; this value can be changed by setting the env var
   `MB_QP_CACHE_BACKEND`. Refer to [[metabase.query-processor.middleware.cache-backend.interface]] for more details
@@ -107,7 +104,8 @@
              min-duration-ms (:min-duration-ms strategy 0)
              eligible?       (and @has-rows?
                                   (> duration-ms min-duration-ms))]
-         (log/infof "Query took %s to run; minimum for cache eligibility is %s; %s"
+         (log/infof "Query %s took %s to run; minimum for cache eligibility is %s; %s"
+                    (i/short-hex-hash query-hash)
                     (u/format-milliseconds duration-ms)
                     (u/format-milliseconds min-duration-ms)
                     (if eligible? "eligible" "not eligible"))
@@ -169,9 +167,9 @@
                             (i/short-hex-hash query-hash) (pr-str (:cache-version metadata)))
                 (when (and (= (:cache-version metadata) cache-version)
                            reducible-rows)
-                  (log/tracef "Reducing cached rows...")
+                  (log/trace "Reducing cached rows...")
                   (let [result (qp.pipeline/*reduce* (cached-results-rff rff query-hash) metadata reducible-rows)]
-                    (log/tracef "All cached rows reduced")
+                    (log/trace "All cached rows reduced")
                     [::ok result])))
               (log/debugf "Not found cached results for hash '%s'" (i/short-hex-hash query-hash)))))
         [::miss nil])
@@ -220,7 +218,8 @@
 
 (defn- is-cacheable? {:arglists '([query])} [{:keys [cache-strategy]}]
   (and (public-settings/enable-query-caching)
-       cache-strategy))
+       (some? cache-strategy)
+       (not= (:type cache-strategy) :nocache)))
 
 (defn maybe-return-cached-results
   "Middleware for caching results of a query if applicable.
@@ -228,6 +227,7 @@
 
      *  Caching (the `enable-query-caching` Setting) must be enabled
      *  The query must pass a `:cache-strategy` value
+     *  This strategy should not be of type `:nocache`
      *  The query must already be permissions-checked. Since the cache bypasses the normal
         query processor pipeline, the ad-hoc permissions-checking middleware isn't applied for cached results.
         (The various `/api/card/` endpoints that make use of caching do `can-read?` checks for the Card *before*

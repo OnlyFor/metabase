@@ -1,3 +1,4 @@
+import userEvent from "@testing-library/user-event";
 import fetchMock from "fetch-mock";
 
 import { setupCollectionItemsEndpoint } from "__support__/server-mocks";
@@ -7,8 +8,10 @@ import {
   mockScrollBy,
   renderWithProviders,
   screen,
+  within,
+  waitFor,
 } from "__support__/ui";
-import type { CollectionId } from "metabase-types/api";
+import type { Collection, CollectionId } from "metabase-types/api";
 import {
   createMockCollection,
   createMockCollectionItem,
@@ -22,6 +25,7 @@ type MockCollection = {
   id: CollectionId;
   name: string;
   location: string | null;
+  effective_location: string | null;
   is_personal: boolean;
   collections: MockCollection[];
 };
@@ -31,12 +35,14 @@ const collectionTree: MockCollection[] = [
     id: "root",
     name: "Our Analytics",
     location: null,
+    effective_location: null,
     is_personal: false,
     collections: [
       {
         id: 4,
         name: "Collection 4",
         location: "/",
+        effective_location: "/",
         is_personal: false,
         collections: [
           {
@@ -44,6 +50,7 @@ const collectionTree: MockCollection[] = [
             name: "Collection 3",
             collections: [],
             location: "/4/",
+            effective_location: "/4/",
             is_personal: false,
           },
         ],
@@ -53,6 +60,7 @@ const collectionTree: MockCollection[] = [
         is_personal: false,
         name: "Collection 2",
         location: "/",
+        effective_location: "/",
         collections: [],
       },
     ],
@@ -61,11 +69,13 @@ const collectionTree: MockCollection[] = [
     name: "My personal collection",
     id: 1,
     location: "/",
+    effective_location: "/",
     is_personal: true,
     collections: [
       {
         id: 5,
         location: "/1/",
+        effective_location: "/1/",
         name: "personal sub_collection",
         is_personal: true,
         collections: [],
@@ -83,11 +93,12 @@ const flattenCollectionTree = (
       id: n.id,
       is_personal: !!n.is_personal,
       location: n.location,
+      effective_location: n.effective_location,
     })),
   ].concat(...node.map(n => flattenCollectionTree(n.collections)));
 };
 
-const walkForCollectionItems = (node: MockCollection[]) => {
+const setupCollectionTreeMocks = (node: MockCollection[]) => {
   node.forEach(n => {
     const collectionItems = n.collections.map((c: MockCollection) =>
       createMockCollectionItem({
@@ -95,6 +106,7 @@ const walkForCollectionItems = (node: MockCollection[]) => {
         name: c.name,
         model: "collection",
         location: c.location || "/",
+        effective_location: c.effective_location || "/",
       }),
     );
 
@@ -105,7 +117,7 @@ const walkForCollectionItems = (node: MockCollection[]) => {
     });
 
     if (collectionItems.length > 0) {
-      walkForCollectionItems(n.collections);
+      setupCollectionTreeMocks(n.collections);
     }
   });
 };
@@ -125,17 +137,16 @@ const setup = ({
   mockGetBoundingClientRect();
   mockScrollBy();
 
-  const allCollections =
-    flattenCollectionTree(collectionTree).map(createMockCollection);
+  const allCollections = flattenCollectionTree(collectionTree).map(c =>
+    createMockCollection(c as Collection),
+  );
 
   //Setup individual collection mocks
   allCollections.forEach(collection => {
     fetchMock.get(`path:/api/collection/${collection.id}`, collection);
   });
 
-  //Setup collection items mocks
-
-  walkForCollectionItems(collectionTree);
+  setupCollectionTreeMocks(collectionTree);
 
   return renderWithProviders(
     <CollectionPicker
@@ -146,7 +157,7 @@ const setup = ({
 };
 
 describe("CollectionPicker", () => {
-  afterAll(() => {
+  afterEach(() => {
     jest.restoreAllMocks();
   });
 
@@ -182,8 +193,6 @@ describe("CollectionPicker", () => {
     expect(
       await screen.findByRole("button", { name: /Collection 3/ }),
     ).toHaveAttribute("data-active", "true");
-
-    expect(await screen.findByLabelText("empty")).toBeInTheDocument();
   });
 
   it("should render the path back to personal collection", async () => {
@@ -197,5 +206,31 @@ describe("CollectionPicker", () => {
     expect(
       await screen.findByRole("button", { name: /personal sub_collection/ }),
     ).toHaveAttribute("data-active", "true");
+  });
+
+  it("should allow selecting, but not navigating into collections without children", async () => {
+    act(() => {
+      setup({ initialValue: { id: 1, model: "collection" } });
+    });
+
+    const personalSubCollectionButton = await screen.findByRole("button", {
+      name: /personal sub_collection/,
+    });
+    expect(personalSubCollectionButton).not.toHaveAttribute("data-active");
+
+    expect(
+      within(personalSubCollectionButton).queryByLabelText("chevronright icon"),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(personalSubCollectionButton);
+
+    expect(personalSubCollectionButton).toHaveAttribute("data-active", "true");
+
+    // selecting an empty collection should not show another column
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("item-picker-level-2"),
+      ).not.toBeInTheDocument(),
+    );
   });
 });

@@ -18,7 +18,7 @@ export interface ObjectDetailHeaderProps {
   }[];
   canZoom: boolean;
   objectName: string;
-  objectId: ObjectId | null | unknown;
+  objectId: ObjectId | null;
   canZoomPreviousRow: boolean;
   canZoomNextRow?: boolean;
   showControls?: boolean;
@@ -42,7 +42,7 @@ export function ObjectDetailHeader({
   return (
     <ObjectDetailHeaderWrapper className={CS.Grid}>
       <div className={CS.GridCell}>
-        <h2 className="p3">
+        <h2 className={CS.p3}>
           {objectName}
           {objectId !== null && <ObjectIdLabel> {objectId}</ObjectIdLabel>}
         </h2>

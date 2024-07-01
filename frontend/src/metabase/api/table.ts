@@ -1,43 +1,49 @@
 import type {
   Field,
-  GetTableMetadataRequest,
+  GetTableQueryMetadataRequest,
   GetTableRequest,
   Table,
   TableId,
+  TableListQuery,
   UpdateTableFieldsOrderRequest,
   UpdateTableListRequest,
   UpdateTableRequest,
 } from "metabase-types/api";
 
 import { Api } from "./api";
-import { idTag, listTag, tag } from "./tags";
+import {
+  idTag,
+  invalidateTags,
+  listTag,
+  provideTableListTags,
+  provideTableTags,
+  tag,
+} from "./tags";
 
 export const tableApi = Api.injectEndpoints({
   endpoints: builder => ({
-    listTables: builder.query<Table[], void>({
-      query: () => ({
+    listTables: builder.query<Table[], TableListQuery | void>({
+      query: params => ({
         method: "GET",
         url: "/api/table",
+        params,
       }),
-      providesTags: (tables = []) => [
-        listTag("table"),
-        ...(tables.map(({ id }) => idTag("table", id)) ?? []),
-      ],
+      providesTags: (tables = []) => provideTableListTags(tables),
     }),
     getTable: builder.query<Table, GetTableRequest>({
       query: ({ id }) => ({
         method: "GET",
         url: `/api/table/${id}`,
       }),
-      providesTags: table => (table ? [idTag("table", table.id)] : []),
+      providesTags: table => (table ? provideTableTags(table) : []),
     }),
-    getTableMetadata: builder.query<Table, GetTableMetadataRequest>({
-      query: ({ id, ...body }) => ({
+    getTableQueryMetadata: builder.query<Table, GetTableQueryMetadataRequest>({
+      query: ({ id, ...params }) => ({
         method: "GET",
         url: `/api/table/${id}/query_metadata`,
-        body,
+        params,
       }),
-      providesTags: table => (table ? [idTag("table", table.id)] : []),
+      providesTags: table => (table ? provideTableTags(table) : []),
     }),
     listTableForeignKeys: builder.query<Field[], TableId>({
       query: id => ({
@@ -52,8 +58,12 @@ export const tableApi = Api.injectEndpoints({
         url: `/api/table/${id}`,
         body,
       }),
-      invalidatesTags: table =>
-        table ? [idTag("table", table.id), idTag("database", table.db_id)] : [],
+      invalidatesTags: (_, error, { id }) =>
+        invalidateTags(error, [
+          idTag("table", id),
+          tag("database"),
+          tag("card"),
+        ]),
     }),
     updateTableList: builder.mutation<Table[], UpdateTableListRequest>({
       query: body => ({
@@ -61,11 +71,8 @@ export const tableApi = Api.injectEndpoints({
         url: "/api/table",
         body,
       }),
-      invalidatesTags: (tables = []) =>
-        tables.flatMap(table => [
-          idTag("table", table.id),
-          idTag("database", table.db_id),
-        ]),
+      invalidatesTags: (_, error) =>
+        invalidateTags(error, [tag("table"), tag("database"), tag("card")]),
     }),
     updateTableFieldsOrder: builder.mutation<
       Table,
@@ -75,26 +82,30 @@ export const tableApi = Api.injectEndpoints({
         method: "PUT",
         url: `/api/table/${id}/fields/order`,
         body,
+        bodyParamName: "field_order",
       }),
-      extraOptions: {
-        requestOptions: { bodyParamName: "field_order" },
-      },
-      invalidatesTags: table =>
-        table ? [idTag("table", table.id), listTag("field")] : [],
+      invalidatesTags: (_, error, { id }) =>
+        invalidateTags(error, [
+          idTag("table", id),
+          listTag("field"),
+          tag("card"),
+        ]),
     }),
     rescanTableFieldValues: builder.mutation<void, TableId>({
       query: id => ({
         method: "POST",
         url: `/api/table/${id}/rescan_values`,
       }),
-      invalidatesTags: [tag("field-values")],
+      invalidatesTags: (_, error) =>
+        invalidateTags(error, [tag("field-values")]),
     }),
     discardTableFieldValues: builder.mutation<void, TableId>({
       query: id => ({
         method: "POST",
         url: `/api/table/${id}/discard_values`,
       }),
-      invalidatesTags: [tag("field-values")],
+      invalidatesTags: (_, error) =>
+        invalidateTags(error, [tag("field-values")]),
     }),
   }),
 });
@@ -102,7 +113,7 @@ export const tableApi = Api.injectEndpoints({
 export const {
   useListTablesQuery,
   useGetTableQuery,
-  useGetTableMetadataQuery,
+  useGetTableQueryMetadataQuery,
   useLazyListTableForeignKeysQuery,
   useUpdateTableMutation,
   useUpdateTableListMutation,

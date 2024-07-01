@@ -54,7 +54,7 @@ const MiniBar = ({ value, extent: [min, max], options }) => {
       {/* OUTER CONTAINER BAR */}
       <div
         data-testid="mini-bar"
-        className="ml1"
+        className={CS.ml1}
         style={{
           position: "relative",
           width: BAR_WIDTH,
@@ -81,7 +81,7 @@ const MiniBar = ({ value, extent: [min, max], options }) => {
               left: "50%",
               top: 0,
               bottom: 0,
-              borderLeft: `1px solid white`,
+              borderLeft: `1px solid ${color("white")}`,
             }}
           />
         )}

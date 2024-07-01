@@ -1,14 +1,13 @@
+import { collectionApi, searchApi } from "metabase/api";
 import { canonicalCollectionId } from "metabase/collections/utils";
-import { createEntity } from "metabase/lib/entities";
+import { createEntity, entityCompatibleQuery } from "metabase/lib/entities";
 import { entityForObject } from "metabase/lib/schema";
 import { ObjectUnionSchema } from "metabase/schema";
-import { CollectionsApi, SearchApi } from "metabase/services";
 
 import Actions from "./actions";
 import Bookmarks from "./bookmarks";
 import Collections from "./collections";
 import Dashboards from "./dashboards";
-import Metrics from "./metrics";
 import Pulses from "./pulses";
 import Questions from "./questions";
 import Segments from "./segments";
@@ -23,7 +22,7 @@ export default createEntity({
   path: "/api/search",
 
   api: {
-    list: async (query = {}, queryOptions = {}) => {
+    list: async (query = {}, dispatch) => {
       if (query.collection) {
         const {
           collection,
@@ -44,9 +43,9 @@ export default createEntity({
           );
         }
 
-        const { data, ...rest } = await CollectionsApi.listItems(
+        const { data, ...rest } = await entityCompatibleQuery(
           {
-            collectionId: collection,
+            id: collection,
             archived,
             models,
             namespace,
@@ -56,7 +55,8 @@ export default createEntity({
             sort_column,
             sort_direction,
           },
-          queryOptions,
+          dispatch,
+          collectionApi.endpoints.listCollectionItems,
         );
 
         return {
@@ -70,7 +70,11 @@ export default createEntity({
             : [],
         };
       } else {
-        const { data, ...rest } = await SearchApi.list(query, queryOptions);
+        const { data, ...rest } = await entityCompatibleQuery(
+          query,
+          dispatch,
+          searchApi.endpoints.search,
+        );
 
         return {
           ...rest,
@@ -161,7 +165,6 @@ export default createEntity({
       Bookmarks.actionShouldInvalidateLists(action) ||
       Collections.actionShouldInvalidateLists(action) ||
       Dashboards.actionShouldInvalidateLists(action) ||
-      Metrics.actionShouldInvalidateLists(action) ||
       Pulses.actionShouldInvalidateLists(action) ||
       Questions.actionShouldInvalidateLists(action) ||
       Segments.actionShouldInvalidateLists(action) ||

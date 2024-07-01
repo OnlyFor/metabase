@@ -4,7 +4,6 @@ import { Component } from "react";
 import { Link } from "react-router";
 
 import CS from "metabase/css/core/index.css";
-import { color } from "metabase/lib/colors";
 
 import S from "./NewModelOption.module.css";
 
@@ -24,8 +23,8 @@ export default class NewModelOption extends Component {
         style={{
           boxSizing: "border-box",
           boxShadow: hover
-            ? `0 3px 8px 0 ${color("text-light")}`
-            : `0 1px 3px 0 ${color("text-light")}`,
+            ? "0 3px 8px 0 var(--mb-color-text-light)"
+            : "0 1px 3px 0 var(--mb-color-text-light)",
           minHeight: 340,
         }}
         onMouseOver={() => this.setState({ hover: true })}
@@ -42,12 +41,14 @@ export default class NewModelOption extends Component {
           />
         </div>
         <div
-          className={cx(CS.textNormal, "mt2 mb2", CS.textParagraph)}
+          className={cx(CS.textNormal, CS.mt2, CS.mb2, CS.textParagraph)}
           style={{ lineHeight: "1.25em" }}
         >
-          <h2 className={cx(S.modelTitle, { "text-brand": hover })}>{title}</h2>
+          <h2 className={cx(S.modelTitle, { [CS.textBrand]: hover })}>
+            {title}
+          </h2>
           <p
-            className={cx("text-medium", CS.textSmall)}
+            className={cx(CS.textMedium, CS.textSmall)}
             style={{ maxWidth: "360px" }}
           >
             {description}

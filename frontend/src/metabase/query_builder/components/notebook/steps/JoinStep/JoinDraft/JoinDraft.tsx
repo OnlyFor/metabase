@@ -10,15 +10,16 @@ import { JoinStrategyPicker } from "../JoinStrategyPicker";
 import { JoinTableColumnDraftPicker } from "../JoinTableColumnDraftPicker";
 import { JoinTablePicker } from "../JoinTablePicker";
 
-import { JoinConditionCell, JoinCell } from "./JoinDraft.styled";
+import { JoinCell, JoinConditionCell } from "./JoinDraft.styled";
 import { getDefaultJoinStrategy, getJoinFields } from "./utils";
 
 interface JoinDraftProps {
   query: Lib.Query;
   stageIndex: number;
   color: string;
+  initialStrategy?: Lib.JoinStrategy;
+  initialRhsTable?: Lib.Joinable;
   isReadOnly: boolean;
-  isModelDataSource: boolean;
   onJoinChange: (join: Lib.Join) => void;
 }
 
@@ -26,20 +27,22 @@ export function JoinDraft({
   query,
   stageIndex,
   color,
+  initialStrategy,
+  initialRhsTable,
   isReadOnly,
-  isModelDataSource,
   onJoinChange,
 }: JoinDraftProps) {
-  const [strategy, setStrategy] = useState(() =>
-    getDefaultJoinStrategy(query, stageIndex),
+  const [strategy, setStrategy] = useState(
+    () => initialStrategy ?? getDefaultJoinStrategy(query, stageIndex),
   );
-  const [rhsTable, setRhsTable] = useState<Lib.Joinable>();
-  const [rhsTableColumns, setRhsTableColumns] = useState<Lib.ColumnMetadata[]>(
-    [],
+  const [rhsTable, setRhsTable] = useState(initialRhsTable);
+  const [rhsTableColumns, setRhsTableColumns] = useState(() =>
+    initialRhsTable
+      ? Lib.joinableColumns(query, stageIndex, initialRhsTable)
+      : [],
   );
-  const [selectedRhsTableColumns, setSelectedRhsTableColumns] = useState<
-    Lib.ColumnMetadata[]
-  >([]);
+  const [selectedRhsTableColumns, setSelectedRhsTableColumns] =
+    useState(rhsTableColumns);
   const [lhsColumn, setLhsColumn] = useState<Lib.ColumnMetadata>();
 
   const lhsTableName = useMemo(
@@ -62,7 +65,7 @@ export function JoinDraft({
       newTable,
     );
     if (newConditions.length > 0) {
-      const newJoin = Lib.joinClause(newTable, newConditions);
+      const newJoin = Lib.joinClause(newTable, newConditions, strategy);
       onJoinChange(newJoin);
     } else {
       const newColumns = Lib.joinableColumns(query, stageIndex, newTable);
@@ -75,7 +78,7 @@ export function JoinDraft({
   const handleConditionChange = (newCondition: Lib.JoinCondition) => {
     if (rhsTable) {
       const newJoin = Lib.withJoinFields(
-        Lib.joinClause(rhsTable, [newCondition]),
+        Lib.joinClause(rhsTable, [newCondition], strategy),
         getJoinFields(rhsTableColumns, selectedRhsTableColumns),
       );
       onJoinChange(newJoin);
@@ -98,11 +101,10 @@ export function JoinDraft({
           />
           <JoinTablePicker
             query={query}
+            stageIndex={stageIndex}
             table={rhsTable}
-            tableName={rhsTableName}
             color={color}
             isReadOnly={isReadOnly}
-            isModelDataSource={isModelDataSource}
             columnPicker={
               <JoinTableColumnDraftPicker
                 query={query}

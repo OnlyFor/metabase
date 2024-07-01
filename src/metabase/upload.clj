@@ -1,5 +1,4 @@
 (ns metabase.upload
-  (:refer-clojure :exclude [derive make-hierarchy parents])
   (:require
    [clj-bom.core :as bom]
    [clojure.data :as data]
@@ -11,6 +10,7 @@
    [metabase.analytics.snowplow :as snowplow]
    [metabase.api.common :as api]
    [metabase.driver :as driver]
+   [metabase.driver.ddl.interface :as ddl.i]
    [metabase.driver.sync :as driver.s]
    [metabase.driver.util :as driver.u]
    [metabase.events :as events]
@@ -22,6 +22,7 @@
    [metabase.models.data-permissions :as data-perms]
    [metabase.models.humanization :as humanization]
    [metabase.models.interface :as mi]
+   [metabase.models.persisted-info :as persisted-info]
    [metabase.models.table :as table]
    [metabase.public-settings :as public-settings]
    [metabase.public-settings.premium-features :as premium-features]
@@ -29,270 +30,49 @@
    [metabase.sync.sync-metadata.fields :as sync-fields]
    [metabase.sync.sync-metadata.tables :as sync-tables]
    [metabase.upload.parsing :as upload-parsing]
+   [metabase.upload.types :as upload-types]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
-   [metabase.util.ordered-hierarchy :as ordered-hierarchy :refer [make-hierarchy]]
    [toucan2.core :as t2])
   (:import
    (java.io File)))
 
 (set! *warn-on-reflection* true)
 
-;;;; +------------------+
-;;;; | Schema detection |
-;;;; +------------------+
+;; TODO: move these to a more appropriate namespace if they need to be reused
+(defmulti max-bytes
+  "This tracks the size of various text fields in bytes."
+  {:arglists '([model column])}
+  (fn [model _column] model))
 
-;; Upload value-types form a DAG (directed acyclic graph) where each type can be relaxed into any of its ancestors.
-;; We parse each value in the CSV file to the most-specific possible type for each column.
+(defmethod max-bytes :model/Table [_ column]
+  (case column
+    :display_name 256
+    :name 256))
 
-;; The most-specific possible type for a column is the closest common ancestor of the types for each value in the
-;; column, found by walking through the graph in topological order, following edges from left to right.
-;; Note that this type is not guaranteed to be one of the least common ancestors!
-;;
-;; See [[metabase.util.ordered-hierarchy/first-common-ancestor]] for more details.
-;;
-;; <pre><code>
-;;
-;;              text
-;;               |
-;;               |
-;;          varchar-255──────
-;;        /      /  \        \
-;;      /      /      \       \
-;;  boolean  float   datetime  offset-datetime
-;;     |       │        │
-;;     |       │        │
-;;     │ *float-or-int* │
-;;     │       │        │
-;;     │       │        │
-;;     |      int      date
-;;     |   /       \
-;;     |  /         \
-;; *boolean-int*  auto-incrementing-int-pk
-;;
-;; </code></pre>
-;;
-;; We have a number of special "abstract" nodes in this graph:
-;;
-;; - `*boolean-int*` is an ambiguous node, that could either be parsed as a boolean or as an integer.
-;; - `*float-or-int*` is any integer, whether it has an explicit decimal point or not.
-;;
-;; While a `*boolean-int*` is a genuinely ambiguous value, `*float-or-int*` exist to power our desired value-type
-;; coercion and column-type promotion behaviour.
-;;
-;; - If we encounter a `*float-or-int*` inside an `int` column, then we can safely coerce it down to an integer.
-;; - If we encounter a `float` (i.e. a non-zero fraction component), then we need to promote the column to a `float.`
-;;
-;; Columns can not have an abstract type, which has no meaning outside of inference and reconciliation.
-;; If we are left with an abstract type after having processed all the values, we first check whether we can coerce
-;; the type to the existing column type, and otherwise traverse further up the graph until we reach a concrete type.
-;;
-;; For ease of reference and explicitness these corresponding values are given in the `abstract->concrete` map.
-;; One can figure out these mappings by simply looking up through the ancestors. For now, we require that it is always
-;; a direct ancestor, and lay out or graph so that it is the left-most one.
+(defmethod max-bytes :model/Field [_ column]
+  (case column
+    :name 254))
 
-(def ^:private h
-  "This hierarchy defines a relationship between value types and their specializations.
-  We use an [[metabase.util.ordered-hierarchy]] for its topological sorting, which simplify writing efficient and
-  consistent implementations for of our type inference, parsing, and relaxation."
-  (make-hierarchy
-   [::text
-    [::varchar-255
-     [::boolean ::*boolean-int*]
-     [::float
-      ;; A number value with a decimal separator, but a zero fractional component.
-      [::*float-or-int*
-       [::int
-        ;; A value that could be legally parsed as either a boolean OR an integer
-        ::*boolean-int*
-        ::auto-incrementing-int-pk]]]
-     [::datetime ::date]
-     ::offset-datetime]]))
+(defmethod max-bytes :model/Card  [_ column]
+  (case column
+    :name 254))
 
-(def ^:private abstract->concrete
-  "Not all value types correspond to column types. We refer to these as \"abstract\" types, and give them *ear-muffs*.
-  This maps implicitly defines the abstract types, by mapping them each to a default concretion."
-  {::*boolean-int*  ::boolean
-   ::*float-or-int* ::float})
+(def ^:private min-safe (fnil min Long/MAX_VALUE Long/MAX_VALUE))
 
-(def ^:private allowed-promotions
-  "A mapping of which types a column can be implicitly relaxed to, based on the content of appended values.
-  If we require a relaxation which is not allow-listed here, we will reject the corresponding file."
-  {::int #{::float}})
-
-(def ^:private column-type->coercible-value-types
-  "A mapping of which value types should be coerced to the given existing type, rather than triggering promotion."
-  {::int #{::*float-or-int*}})
-
-(defn- coerce?
-  "Can values of the given type be coerced to the given existing column type, in a lossless fashion?"
-  [column-type value-type]
-  (contains? (column-type->coercible-value-types column-type) value-type))
-
-(def ^:private value-types
-  "All type tags which values can be inferred as. An ordered set from most to least specialized."
-  (ordered-hierarchy/sorted-tags h))
-
-(def ^:private column-types
-  "All type tags that correspond to concrete column types."
-  (into #{} (remove abstract->concrete) value-types))
-
-(defn- column-type?
-  [value-type]
-  (contains? column-types value-type))
-
-(defn ^:private concretize
-  "Determine the desired column-type given the existing column-type (nil if it's new) and the value-type of the data.
-  If there's a valid coercion to the existing type, we will preserve it, but otherwise we will relax abstract types
-  further to a concrete type."
-  [existing-type value-type]
-  (cond
-    ;; If the type is concrete, there is nothing to do.
-    (column-type? value-type) value-type
-    ;; If we know nothing about the value type, treat it as an arbitrary string.
-    (nil? value-type) ::text
-    ;; If configured, coerce the value to the existing type
-    (coerce? existing-type value-type) existing-type
-    ;; Otherwise, project it to its canonical concretion.
-    :else (abstract->concrete value-type)))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; [[value->type]] helpers
-
-(defn- with-parens
-  "Returns a regex that matches the argument, with or without surrounding parentheses."
-  [number-regex]
-  (re-pattern (str "(" number-regex ")|(\\(" number-regex "\\))")))
-
-(defn- with-currency
-  "Returns a regex that matches a positive or negative number, including currency symbols"
-  [number-regex]
-  ;; currency signs can be all over: $2, -$2, $-2, 2€
-  (re-pattern (str upload-parsing/currency-regex "?\\s*-?"
-                   upload-parsing/currency-regex "?"
-                   number-regex
-                   "\\s*" upload-parsing/currency-regex "?")))
-
-(defn- int-regex
-  "Matches numbers which do not have a decimal separator."
-  [number-separators]
-  (with-parens
-    (with-currency
-      (case number-separators
-        ("." ".,") #"\d[\d,]*"
-        ",." #"\d[\d.]*"
-        ", " #"\d[\d \u00A0]*"
-        ".’" #"\d[\d’]*"))))
-
-(defn- float-or-int-regex
-  "Matches integral numbers, even if they have a decimal separator - e.g. 2 or 2.0"
-  [number-separators]
-  (with-parens
-   (with-currency
-    (case number-separators
-      ("." ".,") #"\d[\d,]*(\.0+)?"
-      ",." #"\d[\d.]*(\,[0]+)?"
-      ", " #"\d[\d \u00A0]*(\,[0.]+)?"
-      ".’" #"\d[\d’]*(\.[0.]+)?"))))
-
-(defn- float-regex
-  "Matches numbers, regardless of whether they have a decimal separator - e.g. 2, 2.0, or 2.2"
-  [number-separators]
-  (with-parens
-    (with-currency
-      (case number-separators
-        ("." ".,") #"\d[\d,]*(\.\d+)?"
-        ",." #"\d[\d.]*(\,[\d]+)?"
-        ", " #"\d[\d \u00A0]*(\,[\d.]+)?"
-        ".’" #"\d[\d’]*(\.[\d.]+)?"))))
-
-(defmacro does-not-throw?
-  "Returns true if the given body does not throw an exception."
-  [body]
-  `(try
-     ~body
-     true
-     (catch Throwable e#
-       false)))
-
-(defn- date-string? [s]
-  (does-not-throw? (upload-parsing/parse-local-date s)))
-
-(defn- datetime-string? [s]
-  (does-not-throw? (upload-parsing/parse-local-datetime s)))
-
-(defn- offset-datetime-string? [s]
-  (does-not-throw? (upload-parsing/parse-offset-datetime s)))
-
-(defn- boolean-string? [s]
-  (boolean (re-matches #"(?i)true|t|yes|y|1|false|f|no|n|0" s)))
-
-(defn- boolean-int-string? [s]
-  (contains? #{"0" "1"} s))
-
-(defn- varchar-255? [s]
-  (<= (count s) 255))
-
-(defn- regex-matcher [regex]
-  (fn [s]
-    (boolean (re-matches regex s))))
-
-;; end [[value->type]] helpers
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-(def ^:private non-inferable-types
-  #{::auto-incrementing-int-pk})
-
-(def ^:private type->check-schema
-  "Every inferable value-type needs to have a detection function registered."
-  (into [:map] (map #(vector % [:=> [:cat :string] :boolean])
-                    (remove non-inferable-types value-types))))
-
-(mu/defn ^:private settings->type->check :- type->check-schema
-  [{:keys [number-separators] :as _settings}]
-  (let [int-string?   (regex-matcher (int-regex number-separators))
-        float-or-int? (regex-matcher (float-or-int-regex number-separators))
-        float-string? (regex-matcher (float-regex number-separators))]
-    {::*boolean-int*   boolean-int-string?
-     ::boolean         boolean-string?
-     ::offset-datetime offset-datetime-string?
-     ::date            date-string?
-     ::datetime        datetime-string?
-     ::int             int-string?
-     ::*float-or-int*  float-or-int?
-     ::float           float-string?
-     ::varchar-255     varchar-255?
-     ::text            (constantly true)}))
-
-(defn- value->type
-  "Determine the most specific type that is compatible with the given value.
-  Numbers are assumed to use separators corresponding to the locale defined in the application settings"
-  [type->check value]
-  (when-not (str/blank? value)
-    (let [trimmed (str/trim value)]
-      (->> (remove non-inferable-types value-types)
-           (filter #((type->check %) trimmed))
-           first))))
-
-(defn- relax-type
-  "Given an existing column type, and a new value, relax the type until it includes the value."
-  [type->check current-type value]
-  (cond (nil? value) current-type
-        (nil? current-type) (value->type type->check value)
-        :else (let [trimmed (str/trim value)]
-                (if (str/blank? trimmed)
-                  current-type
-                  (->> (cons current-type (ancestors h current-type))
-                       (filter #((type->check %) trimmed))
-                       first)))))
+(defn- max-column-bytes [driver]
+  (let [column-limit (some-> driver driver/column-name-length-limit)]
+    (min-safe column-limit (max-bytes :model/Field :name))))
 
 (defn- normalize-column-name
-  [raw-name]
+  [driver raw-name]
   (if (str/blank? raw-name)
     "unnamed_column"
-    (u/slugify (str/trim raw-name))))
+    (u/slugify (str/trim raw-name)
+               ;; since slugified names contain only ASCII characters, we can conflate bytes and length here.
+               {:max-length (max-column-bytes driver)})))
 
 (def auto-pk-column-name
   "The lower-case name of the auto-incrementing PK column. The actual name in the database could be in upper-case."
@@ -302,45 +82,22 @@
   "The keyword of the auto-incrementing PK column."
   (keyword auto-pk-column-name))
 
-(defn- table-id->auto-pk-column [table-id]
+(defn- table-id->auto-pk-column [driver table-id]
   (first (filter (fn [field]
-                   (= (normalize-column-name (:name field)) auto-pk-column-name))
+                   (= (normalize-column-name driver (:name field)) auto-pk-column-name))
                  (t2/select :model/Field :table_id table-id :active true))))
-
-(defn- type-relaxer
-  "Given a map of {value-type -> predicate}, return a reducing fn which updates our inferred schema using the next row."
-  [settings]
-  (let [relax (partial relax-type (settings->type->check settings))]
-    (fn [value-types row]
-      ;; It's important to realize this lazy sequence, because otherwise we can build a huge stack and overflow.
-      (vec (u/map-all relax value-types row)))))
-
-(mu/defn column-types-from-rows :- [:sequential (into [:enum] column-types)]
-  "Given the types of the existing columns (if there are any), and rows to be added, infer the best supporting types."
-  [settings existing-types rows]
-  (->> (reduce (type-relaxer settings) existing-types rows)
-       (u/map-all concretize existing-types)))
 
 (defn- detect-schema
   "Consumes the header and rows from a CSV file.
 
-   Returns a map with two keys:
-     - `:extant-columns`: an ordered map of columns found in the CSV file, excluding columns that have the same normalized name as the generated columns.
-     - `:generated-columns`: an ordered map of columns we are generating ourselves. Currently, this is just the auto-incrementing PK.
-
-   The value of `extant-columns` and `generated-columns` is an ordered map of normalized-column-name -> type for the
-   given CSV file. Supported types include `::int`, `::datetime`, etc. A column that is completely blank is assumed to
-   be of type `::text`."
-  [settings header rows]
-  (let [normalized-header   (map normalize-column-name header)
-        unique-header       (map keyword (mbql.u/uniquify-names normalized-header))
-        column-count        (count normalized-header)
+   Returns an ordered map of normalized-column-name -> type for the given CSV file. Supported types include `::int`,
+   `::datetime`, etc. A column that is completely blank is assumed to be of type `::text`."
+  [settings unique-header rows]
+  (let [column-count        (count unique-header)
         initial-types       (repeat column-count nil)
-        col-name+type-pairs (->> (column-types-from-rows settings initial-types rows)
+        col-name+type-pairs (->> (upload-types/column-types-from-rows settings initial-types rows)
                                  (map vector unique-header))]
-    {:extant-columns    (ordered-map/ordered-map col-name+type-pairs)
-     :generated-columns (ordered-map/ordered-map auto-pk-column-keyword ::auto-incrementing-int-pk)}))
-
+    (ordered-map/ordered-map col-name+type-pairs)))
 
 ;;;; +------------------+
 ;;;; |  Parsing values  |
@@ -350,7 +107,7 @@
 
 (set! *warn-on-reflection* true)
 
-(defn strictly-monotonic-now
+(defn- strictly-monotonic-now
   "Return an adjusted version of the current time, that it is guaranteed to never repeat the last second."
   []
   (swap! last-timestamp
@@ -366,23 +123,37 @@
   [driver table-name]
   (let [time-format                 "_yyyyMMddHHmmss"
         slugified-name               (or (u/slugify table-name) "")
-        max-length                  (- (driver/table-name-length-limit driver) (count time-format))
+        ;; since both the time-format and the slugified-name contain only ASCII characters, we can behave as if
+        ;; [[driver/table-name-length-limit]] were defining a length in characters.
+        max-length                  (- (min-safe (driver/table-name-length-limit driver)
+                                                 (max-bytes :model/Table :name))
+                                       (count time-format))
         acceptable-length           (min (count slugified-name) max-length)
         truncated-name-without-time (subs slugified-name 0 acceptable-length)]
     (str truncated-name-without-time
          (t/format time-format (strictly-monotonic-now)))))
 
+(mu/defn ^:private database-type
+  [driver
+   column-type :- (into [:enum] upload-types/column-types)]
+  (let [external-type (keyword "metabase.upload" (name column-type))]
+    (driver/upload-type->database-type driver external-type)))
+
+(defn- defaulting-database-type [driver upload-type]
+  (or (database-type driver upload-type)
+      (database-type driver ::upload-types/varchar-255)))
+
 (defn- column-definitions
   "Returns a map of column-name -> column-definition from a map of column-name -> upload-type."
   [driver col->upload-type]
-  (update-vals col->upload-type (partial driver/upload-type->database-type driver)))
+  (update-vals col->upload-type (partial defaulting-database-type driver)))
 
 (defn current-database
-  "The database being used for uploads (as per the `uploads-database-id` setting)."
+  "The database being used for uploads."
   []
-  (t2/select-one Database :id (public-settings/uploads-database-id)))
+  (t2/select-one Database :uploads_enabled true))
 
-(mu/defn ^:private table-identifier
+(mu/defn table-identifier
   "Returns a string that can be used as a table identifier in SQL, including a schema if provided."
   [{:keys [schema name] :as _table}
    :- [:map
@@ -421,7 +192,9 @@
 (defn- auto-pk-column-indices
   "Returns the indices of columns that have the same normalized name as [[auto-pk-column-name]]"
   [header]
-  (set (indices-where #(= auto-pk-column-name (normalize-column-name %)) header)))
+  ;; We don't need to pass the driver, as we are comparing to auto-pk-column-name, which does not need to be truncated.
+  (let [driver nil]
+    (set (indices-where #(= auto-pk-column-name (normalize-column-name driver %)) header))))
 
 (defn- without-auto-pk-columns
   [header-and-rows]
@@ -449,12 +222,12 @@
   (let [count-columns (fn [s]
                         ;; Create a separate reader per separator, as the line-breaking behaviour depends on the parser.
                         (with-open [reader (bom/bom-reader file)]
-                          (->> (csv/read-csv reader :separator s)
-                               ;; we only consider the header row and the first data row
-                               (take 2)
-                               (map count)
-                               ;; realize the list before the reader closes
-                               doall)))]
+                          (try (into []
+                                     ;; take first two rows and count the number of columns in each to compare headers
+                                     ;; vs data rows.
+                                     (comp (take 2) (map count))
+                                     (csv/read-csv reader :separator s))
+                               (catch Exception _e nil))))]
     (->> (map (juxt identity count-columns) separators)
          ;; We cannot have more data columns than header columns
          ;; We currently support files without any data rows, and these get a free pass.
@@ -482,51 +255,74 @@
     (fn [stream]
       (csv/read-csv stream :separator s))))
 
+(defn- columns-with-auto-pk [columns]
+  (merge (ordered-map/ordered-map auto-pk-column-keyword ::upload-types/auto-incrementing-int-pk) columns))
+
+(defn- auto-pk-column?
+  "Returns true if there should be an auto-incrementing primary key column in any table created or updated from an
+   upload."
+  [driver db]
+  (driver.u/supports? driver :upload-with-auto-pk db))
+
+(defn- derive-column-names [driver header]
+  (let [normalized-header (for [h header] (normalize-column-name driver h))
+        unique-header     (mbql.u/uniquify-names normalized-header)]
+    (map keyword unique-header)))
+
 (defn- create-from-csv!
   "Creates a table from a CSV file. If the table already exists, it will throw an error.
    Returns the file size, number of rows, and number of columns."
-  [driver db-id table-name ^File csv-file]
+  [driver db table-name ^File csv-file]
   (let [parse (infer-parser csv-file)]
     (with-open [reader (bom/bom-reader csv-file)]
-      (let [[header & rows] (without-auto-pk-columns (parse reader))
+      (let [auto-pk?          (auto-pk-column? driver db)
+            [header & rows]   (cond-> (parse reader)
+                                auto-pk?
+                                without-auto-pk-columns)
             settings          (upload-parsing/get-settings)
-            {:keys [extant-columns generated-columns]} (detect-schema settings header rows)
-            cols->upload-type (merge generated-columns extant-columns)
-            col-definitions   (column-definitions driver cols->upload-type)
-            csv-col-names     (keys extant-columns)
-            col-upload-types  (vals extant-columns)
+            column-names      (derive-column-names driver header)
+            cols->upload-type (detect-schema settings column-names rows)
+            col-definitions   (column-definitions driver (cond-> cols->upload-type
+                                                           auto-pk?
+                                                           columns-with-auto-pk))
+            csv-col-names     (keys cols->upload-type)
+            col-upload-types  (vals cols->upload-type)
             parsed-rows       (vec (parse-rows settings col-upload-types rows))]
         (driver/create-table! driver
-                              db-id
+                              (:id db)
                               table-name
                               col-definitions
-                              :primary-key [auto-pk-column-keyword])
+                              (when auto-pk?
+                                {:primary-key [auto-pk-column-keyword]}))
         (try
-          (driver/insert-into! driver db-id table-name csv-col-names parsed-rows)
+          (driver/insert-into! driver (:id db) table-name csv-col-names parsed-rows)
           {:num-rows          (count rows)
-           :num-columns       (count extant-columns)
-           :generated-columns (count generated-columns)
+           :num-columns       (count cols->upload-type)
+           :generated-columns (if auto-pk? 1 0)
            :size-mb           (file-size-mb csv-file)}
           (catch Throwable e
-            (driver/drop-table! driver db-id table-name)
+            (driver/drop-table! driver (:id db) table-name)
             (throw (ex-info (ex-message e) {:status-code 400}))))))))
 
 ;;;; +------------------+
 ;;;; |  Create upload
 ;;;; +------------------+
 
-(def ^:dynamic *sync-synchronously?*
-  "For testing purposes, often we'd like to sync synchronously so that we can test the results immediately and avoid
-  race conditions."
-  false)
+(def ^:dynamic *auxiliary-sync-steps*
+  "For testing purposes, we'd like to control whether the analyze and field values steps of sync are run synchronously, or not at all.
+   In production this should always be asynchronous, so users can use the table earlier."
+  :asynchronous)
 
 (defn- scan-and-sync-table!
   [database table]
   (sync-fields/sync-fields-for-table! database table)
-  (if *sync-synchronously?*
-    (sync/sync-table! table)
-    (future
-      (sync/sync-table! table))))
+  (case *auxiliary-sync-steps*
+    :asynchronous (future (sync/sync-table! table))
+    :synchronous (sync/sync-table! table)
+    :never nil))
+
+(defn- uploads-enabled? []
+  (some? (:db_id (public-settings/uploads-settings))))
 
 (defn- can-use-uploads-error
   "Returns an ExceptionInfo object if the user cannot upload to the given database for the subset of reasons common to all uploads
@@ -534,7 +330,7 @@
   [db]
   (let [driver (driver.u/database->driver db)]
     (cond
-      (not (public-settings/uploads-enabled))
+      (not (uploads-enabled?))
       (ex-info (tru "Uploads are not enabled.")
                {:status-code 422})
 
@@ -542,29 +338,40 @@
       (ex-info (tru "Uploads are not permitted for sandboxed users.")
                {:status-code 403})
 
-      (not (driver/database-supports? driver :uploads nil))
+      (not (driver.u/supports? driver :uploads db))
       (ex-info (tru "Uploads are not supported on {0} databases." (str/capitalize (name driver)))
                {:status-code 422}))))
 
 (defn- can-create-upload-error
   "Returns an ExceptionInfo object if the user cannot upload to the given database and schema. Returns nil otherwise."
   [db schema-name]
-  (or (can-use-uploads-error db)
-      (cond
+  (or (cond
+        (not (:uploads_enabled db))
+        (ex-info (tru "Uploads are not enabled.")
+                 {:status-code 422})
         (and (str/blank? schema-name)
-             (driver/database-supports? (driver.u/database->driver db) :schemas db))
+             (driver.u/supports? (driver.u/database->driver db) :schemas db))
         (ex-info (tru "A schema has not been set.")
                  {:status-code 422})
-        (not= :unrestricted (data-perms/full-schema-permission-for-user api/*current-user-id*
-                                                                        :perms/data-access
-                                                                        (u/the-id db)
-                                                                        schema-name))
+        (not
+         (and
+          (= :unrestricted (data-perms/full-db-permission-for-user api/*current-user-id*
+                                                                   :perms/view-data
+                                                                   (u/the-id db)))
+          ;; previously this required `unrestricted` data access, i.e. not `no-self-service`, which corresponds to *both*
+          ;; (at least) `:query-builder` plus unrestricted view-data
+          (contains? #{:query-builder :query-builder-and-native}
+                     (data-perms/full-schema-permission-for-user api/*current-user-id*
+                                                                 :perms/create-queries
+                                                                 (u/the-id db)
+                                                                 schema-name))))
         (ex-info (tru "You don''t have permissions to do that.")
                  {:status-code 403})
         (and (some? schema-name)
              (not (driver.s/include-schema? db schema-name)))
         (ex-info (tru "The schema {0} is not syncable." schema-name)
-                 {:status-code 422}))))
+                 {:status-code 422}))
+   (can-use-uploads-error db)))
 
 (defn- check-can-create-upload
   "Throws an error if the user cannot upload to the given database and schema."
@@ -596,6 +403,28 @@
          :num-columns       (count (first rows))
          :num-rows          (count (rest rows))
          :generated-columns 0}))))
+
+(defn- create-from-csv-and-sync!
+  "This is separated from `create-csv-upload!` for testing"
+  [{:keys [db file schema table-name display-name]}]
+  (let [driver            (driver.u/database->driver db)
+        schema            (some->> schema (ddl.i/format-name driver))
+        table-name        (some->> table-name (ddl.i/format-name driver))
+        schema+table-name (table-identifier {:schema schema :name table-name})
+        stats             (create-from-csv! driver db schema+table-name file)
+        ;; Sync immediately to create the Table and its Fields; the scan is settings-dependent and can be async
+        table             (sync-tables/create-table! db {:name         table-name
+                                                         :schema       (not-empty schema)
+                                                         :display_name display-name})
+        _set_is_upload    (t2/update! :model/Table (:id table) {:is_upload true})
+        _sync             (scan-and-sync-table! db table)
+        ;; Set the display_name of the auto-generated primary key column to the same as its name, so that if users
+        ;; download results from the table as a CSV and reupload, we'll recognize it as the same column
+        _ (when (auto-pk-column? driver db)
+            (let [auto-pk-field (table-id->auto-pk-column driver (:id table))]
+              (t2/update! :model/Field (:id auto-pk-field) {:display_name (:name auto-pk-field)})))]
+    {:table table
+     :stats stats}))
 
 (mu/defn create-csv-upload!
   "Main entry point for CSV uploading.
@@ -634,22 +463,21 @@
     (collection/check-write-perms-for-collection collection-id)
     (try
       (let [timer             (start-timer)
-            driver            (driver.u/database->driver database)
             filename-prefix   (or (second (re-matches #"(.*)\.(csv|tsv)$" filename))
                                   filename)
-            table-name        (->> (str table-prefix filename-prefix)
+            humanized-name    (humanization/name->human-readable-name filename-prefix)
+            display-name      (u/truncate-string-to-byte-count humanized-name (max-bytes :model/Table :display_name))
+            card-name         (u/truncate-string-to-byte-count humanized-name (max-bytes :model/Card :name))
+            driver            (driver.u/database->driver database)
+            table-name        (->> (str table-prefix display-name)
                                    (unique-table-name driver)
                                    (u/lower-case-en))
-            schema+table-name (table-identifier {:schema schema-name :name table-name})
-            stats             (create-from-csv! driver (:id database) schema+table-name file)
-            ;; Sync immediately to create the Table and its Fields; the scan is settings-dependent and can be async
-            table             (sync-tables/create-or-reactivate-table! database {:name table-name :schema (not-empty schema-name)})
-            _set_is_upload    (t2/update! :model/Table (:id table) {:is_upload true})
-            _sync             (scan-and-sync-table! database table)
-            ;; Set the display_name of the auto-generated primary key column to the same as its name, so that if users
-            ;; download results from the table as a CSV and reupload, we'll recognize it as the same column
-            auto-pk-field     (table-id->auto-pk-column (:id table))
-            _                 (t2/update! :model/Field (:id auto-pk-field) {:display_name (:name auto-pk-field)})
+            {:keys [stats
+                    table]}   (create-from-csv-and-sync! {:db           database
+                                                          :file         file
+                                                          :schema       schema-name
+                                                          :table-name   table-name
+                                                          :display-name display-name})
             card              (card/create-card!
                                {:collection_id          collection-id
                                 :type                   :model
@@ -658,7 +486,7 @@
                                                          :query    {:source-table (:id table)}
                                                          :type     :query}
                                 :display                :table
-                                :name                   (humanization/name->human-readable-name filename-prefix)
+                                :name                   card-name
                                 :visualization_settings {}}
                                @api/*current-user*)
             upload-seconds    (/ (since-ms timer) 1e3)
@@ -685,20 +513,6 @@
 ;;; |  appending to uploaded table
 ;;; +-----------------------------
 
-(defn- base-type->upload-type
-  "Returns the most specific upload type for the given base type."
-  [base-type]
-  (when base-type
-    (condp #(isa? %2 %1) base-type
-      :type/Float                  ::float
-      :type/BigInteger             ::int
-      :type/Integer                ::int
-      :type/Boolean                ::boolean
-      :type/DateTimeWithTZ         ::offset-datetime
-      :type/DateTime               ::datetime
-      :type/Date                   ::date
-      :type/Text                   ::text)))
-
 (defn- not-blank [s]
   (when-not (str/blank? s)
     s))
@@ -722,10 +536,9 @@
     - the schema of the CSV file does not match the schema of the table
 
     Note that we do not require the column ordering to be consistent between the header and the table schema."
-  [fields-by-normed-name header]
+  [fields-by-normed-name normalized-header]
   ;; Assumes table-cols are unique when normalized
   (let [normalized-field-names (keys fields-by-normed-name)
-        normalized-header      (map normalize-column-name header)
         [extra missing _both]  (data/diff (set normalized-header) (set normalized-field-names))]
     ;; check for duplicates
     (when (some #(< 1 %) (vals (frequencies normalized-header)))
@@ -733,12 +546,6 @@
                       {:status-code 422})))
     (when-let [error-message (extra-and-missing-error-markdown extra missing)]
       (throw (ex-info error-message {:status-code 422})))))
-
-(defn- matching-or-promotable? [current-type relaxed-type]
-  (or (nil? current-type)
-      (= current-type relaxed-type)
-      (when-let [f (allowed-promotions current-type)]
-        (f relaxed-type))))
 
 (defn- field-changes
   "Given existing and newly inferred types for the given `field-names`, calculate which fields need to be added or updated, along with their new types."
@@ -756,7 +563,7 @@
   (m/map-kv
    (fn [field-name col-type]
      [(keyword field-name)
-      (driver/upload-type->database-type driver col-type)])
+      (database-type driver col-type)])
    field->col-type))
 
 (defn- add-columns! [driver database table field->type & args]
@@ -769,35 +576,74 @@
   (when (seq field->new-type)
     (apply driver/alter-columns! driver (:id database) (table-identifier table)
            (field->db-type driver field->new-type)
-            args)))
+           args)))
+
+(defn- mbql? [model]
+  (= "query" (name (:query_type model "query"))))
+
+(defn- no-joins?
+  "Returns true if `query` has no explicit joins in it, otherwise false."
+  [query]
+  ;; TODO while it's unlikely (at the time of writing this) that uploaded tables have FKs, we should probably check
+  ;;      for implicit joins as well.
+  (->> (range (lib/stage-count query))
+       (not-any? (fn [stage-idx]
+                   (lib/joins query stage-idx)))))
+
+(defn- only-table-id
+  "For models that depend on only one table, return its id, otherwise return nil. Doesn't support native queries."
+  [model]
+  ; dataset_query can be empty in tests
+  (when-let [query (some-> model :dataset_query lib/->pMBQL not-empty)]
+    (when (and (mbql? model) (no-joins? query))
+      (lib/source-table-id query))))
+
+(defn- invalidate-cached-models!
+  "Invalidate the model caches for all cards whose `:based_on_upload` value resolves to the given table."
+  [table]
+  ;; NOTE: It is important that this logic is kept in sync with `model-hydrate-based-on-upload`
+  (when-let [model-ids (->> (t2/select [:model/Card :id :dataset_query]
+                                       :table_id (:id table)
+                                       :type     :model
+                                       :archived false)
+                            (filter (comp #{(:id table)} only-table-id))
+                            (map :id)
+                            seq)]
+    ;; Ideally we would do all the filtering in the query, but this would not allow us to leverage mlv2.
+    (persisted-info/invalidate! {:card_id [:in model-ids]})))
 
 (defn- update-with-csv! [database table file & {:keys [replace-rows?]}]
   (try
     (let [parse (infer-parser file)]
       (with-open [reader (bom/bom-reader file)]
         (let [timer              (start-timer)
-              [header & rows] (without-auto-pk-columns (parse reader))
               driver             (driver.u/database->driver database)
-              normed-name->field (m/index-by (comp normalize-column-name :name)
+              auto-pk?           (auto-pk-column? driver database)
+              [header & rows]    (cond-> (parse reader)
+                                   auto-pk?
+                                   without-auto-pk-columns)
+              normed-name->field (m/index-by #(normalize-column-name driver (:name %))
                                              (t2/select :model/Field :table_id (:id table) :active true))
-              normed-header      (map normalize-column-name header)
+              normalized-header  (for [h header] (normalize-column-name driver h))
               create-auto-pk?    (and
+                                  auto-pk?
                                   (driver/create-auto-pk-with-append-csv? driver)
                                   (not (contains? normed-name->field auto-pk-column-name)))
-              _                  (check-schema (dissoc normed-name->field auto-pk-column-name) header)
+              normed-name->field (cond-> normed-name->field auto-pk? (dissoc auto-pk-column-name))
+              _                  (check-schema normed-name->field normalized-header)
               settings           (upload-parsing/get-settings)
-              old-types          (map (comp base-type->upload-type :base_type normed-name->field) normed-header)
+              old-types          (map (comp upload-types/base-type->upload-type :base_type normed-name->field) normalized-header)
               ;; in the happy, and most common, case all the values will match the existing types
               ;; for now we just plan for the worst and perform a fairly expensive operation to detect any type changes
               ;; we can come back and optimize this to an optimistic-with-fallback approach later.
-              detected-types     (column-types-from-rows settings old-types rows)
-              new-types          (map #(if (matching-or-promotable? %1 %2) %2 %1) old-types detected-types)
+              detected-types     (upload-types/column-types-from-rows settings old-types rows)
+              new-types          (map upload-types/new-type old-types detected-types)
               ;; avoid any schema modification unless all the promotions required by the file are supported,
               ;; choosing to not promote means that we will defer failure until we hit the first value that cannot
               ;; be parsed as its existing type - there is scope to improve these error messages in the future.
               modify-schema?     (and (not= old-types new-types) (= detected-types new-types))
               _                  (when modify-schema?
-                                   (let [changes (field-changes normed-header old-types new-types)]
+                                   (let [changes (field-changes normalized-header old-types new-types)]
                                      (add-columns! driver database table (:added changes))
                                      (alter-columns! driver database table (:updated changes))))
               ;; this will fail if any of our required relaxations were rejected.
@@ -808,24 +654,25 @@
                                   :generated-columns (if create-auto-pk? 1 0)
                                   :size-mb           (file-size-mb file)
                                   :upload-seconds    (since-ms timer)}]
-
           (try
             (when replace-rows?
               (driver/truncate! driver (:id database) (table-identifier table)))
-            (driver/insert-into! driver (:id database) (table-identifier table) normed-header parsed-rows)
+            (driver/insert-into! driver (:id database) (table-identifier table) normalized-header parsed-rows)
             (catch Throwable e
               (throw (ex-info (ex-message e) {:status-code 422}))))
 
           (when create-auto-pk?
             (add-columns! driver database table
-                          {auto-pk-column-keyword ::auto-incrementing-int-pk}
+                          {auto-pk-column-keyword ::upload-types/auto-incrementing-int-pk}
                           :primary-key [auto-pk-column-keyword]))
 
           (scan-and-sync-table! database table)
 
           (when create-auto-pk?
-            (let [auto-pk-field (table-id->auto-pk-column (:id table))]
+            (let [auto-pk-field (table-id->auto-pk-column driver (:id table))]
               (t2/update! :model/Field (:id auto-pk-field) {:display_name (:name auto-pk-field)})))
+
+          (invalidate-cached-models! table)
 
           (events/publish-event! :event/upload-append
                                  {:user-id  (:id @api/*current-user*)
@@ -862,14 +709,69 @@
   (when-let [error (can-update-error db table)]
     (throw error)))
 
-(defn can-upload-to-table?
+(defn- can-upload-to-table?
   "Returns true if the user can upload to the given database and table, and false otherwise."
   [db table]
   (nil? (can-update-error db table)))
 
+(defn- can-delete-error
+  "Returns an ExceptionInfo object if the user cannot delete the given upload. Returns nil otherwise."
+  [table]
+  (cond
+    (not (:is_upload table))
+    (ex-info (tru "The table must be an uploaded table.")
+             {:status-code 422})
+
+    (not (mi/can-write? table))
+    (ex-info (tru "You don''t have permissions to do that.")
+             {:status-code 403})))
+
+(defn- check-can-delete
+  "Throws an error if the given table is not an upload, or if the user does not have permission to delete it."
+  [table]
+  ;; For now anyone that can update a table is allowed to delete it.
+  (when-let [error (can-delete-error table)]
+    (throw error)))
+
 ;;; +--------------------------------------------------
 ;;; |  public interface for updating an uploaded table
 ;;; +--------------------------------------------------
+
+(defn delete-upload!
+  "Delete the given table from both the app-db and the customer database."
+  [table & {:keys [archive-cards?]}]
+  (let [database   (table/database table)
+        driver     (driver.u/database->driver database)
+        table-name (table-identifier table)]
+    (check-can-delete table)
+
+    ;; Attempt to delete the underlying data from the customer database.
+    ;; We perform this before marking the table as inactive in the app db so that even if it false, the table is still
+    ;; visible to administrators and the operation is easy to retry again later.
+    (driver/drop-table! driver (:id database) table-name)
+
+    ;; We mark the table as inactive synchronously, so that it will no longer shows up in the admin list.
+    (t2/update! :model/Table :id (:id table) {:active false})
+
+    ;; Ideally we would immediately trigger any further clean-up associated with the table being deactivated, but at
+    ;; the time of writing this sync isn't wired up to do anything with explicitly inactive tables, and rather
+    ;; relies on their absence from the tables being described during the database sync itself.
+    ;; TODO update the [[metabase.sync]] module to support direct per-table clean-up
+    ;; Ideally this will also clean up more the metadata which we had created around it, e.g. advanced field values.
+    #_(future (sync/retire-table! (assoc table :active false)))
+
+    ;; Archive the related cards if the customer opted in.
+    ;;
+    ;; For now, this only covers instances where the card has this as its "primary table", i.e.
+    ;; 1. A MBQL question or model that has this table as their first or only data source, or
+    ;; 2. A MBQL question or model that depends on such a model as their first or only data source.
+    ;; Note that this does not include cases where we join to this table, or even native queries which depend .
+    (when archive-cards?
+      (t2/update-returning-pks! :model/Card
+                                {:table_id (:id table) :archived false}
+                                {:archived true}))
+
+    :done))
 
 (def update-action-schema
   "The :action values supported by [[update-csv!]]"
@@ -894,21 +796,13 @@
 ;;; |  hydrate based_on_upload for FE
 ;;; +--------------------------------
 
-(defn uploadable-table-ids
+(defn- uploadable-table-ids
   "Returns the subset of table ids where the user can upload to the table."
   [table-ids]
   (set (when (seq table-ids)
          (->> (t2/hydrate (t2/select :model/Table :id [:in table-ids]) :db)
               (filter #(can-upload-to-table? (:db %) %))
               (map :id)))))
-
-(defn- no-joins?
-  "Returns true if `query` has no joins in it, otherwise false."
-  [query]
-  (let [all-joins (mapcat (fn [stage]
-                            (lib/joins query stage))
-                          (range (lib/stage-count query)))]
-    (empty? all-joins)))
 
 (mu/defn model-hydrate-based-on-upload
   "Batch hydrates `:based_on_upload` for each item of `models`. Assumes each item of `model` represents a model."
@@ -927,15 +821,12 @@
                                    (remove #(false? (:is_upload %)))
                                    (keep :table_id)
                                    set)
-        mbql?                 (fn [model] (= "query" (name (:query_type model "query"))))
         has-uploadable-table? (comp (uploadable-table-ids table-ids) :table_id)]
     (for [model models]
-      (m/assoc-some
-       model
-       :based_on_upload
-       (when-let [query (some-> model :dataset_query lib/->pMBQL not-empty)] ; dataset_query can be empty in tests
-         (when (and (mbql? model) (has-uploadable-table? model) (no-joins? query))
-           (lib/source-table-id query)))))))
+      ;; NOTE: It is important that this logic is kept in sync with `invalidate-cached-models!`
+      ;; If not, it will mean that the user could modify the table via a given model's page without seeing it update.
+      (m/assoc-some model :based_on_upload (when (has-uploadable-table? model)
+                                             (only-table-id model))))))
 
 (mi/define-batched-hydration-method based-on-upload
   :based_on_upload
@@ -944,8 +835,11 @@
     - the query is a GUI query, and does not have any joins
     - the base table of the card is based on an upload
     - the user has permissions to upload to the table
-    - uploads are enabled
-  Otherwise based_on_upload is nil."
+    - uploads are enabled for at least one database (users can append/replace an upload table as long as uploads are
+      enabled for a database, even if the table is not in a database for which uploads are enabled.)
+  Otherwise based_on_upload is nil.
+  Excluding checking the users write permissions for the card, `:based_on_upload` reflects the user's
+  ability to upload to the underlying table through the card."
   [cards]
   (let [id->model         (m/index-by :id (model-hydrate-based-on-upload (filter #(= (:type %) :model) cards)))
         card->maybe-model (comp id->model :id)]

@@ -7,8 +7,13 @@ import {
   setupDatabasesEndpoints,
   setupErrorParameterValuesEndpoints,
   setupParameterValuesEndpoints,
+  setupSearchEndpoints,
   setupUnauthorizedCardsEndpoints,
   setupUnauthorizedCollectionsEndpoints,
+  setupRecentViewsAndSelectionsEndpoints,
+  setupTableQueryMetadataEndpoint,
+  setupCollectionByIdEndpoint,
+  setupCollectionItemsEndpoint,
 } from "__support__/server-mocks";
 import {
   renderWithProviders,
@@ -26,6 +31,8 @@ import {
   createMockDatabase,
   createMockField,
   createMockParameterValues,
+  createMockTable,
+  createMockUser,
 } from "metabase-types/api/mocks";
 
 import ValuesSourceModal from "./ValuesSourceModal";
@@ -61,7 +68,7 @@ describe("ValuesSourceModal", () => {
       });
 
       expect(
-        screen.getByText(/We don’t have any cached values/),
+        await screen.findByText(/We don’t have any cached values/),
       ).toBeInTheDocument();
     });
 
@@ -75,7 +82,7 @@ describe("ValuesSourceModal", () => {
         }),
       });
 
-      expect(screen.getByRole("textbox")).toHaveValue("A\nB\nC");
+      expect(await screen.findByRole("textbox")).toHaveValue("A\nB\nC");
     });
 
     it("should not show the connected fields option if parameter is not wired to any fields", async () => {
@@ -125,7 +132,7 @@ describe("ValuesSourceModal", () => {
           values: [["C"], ["D"]],
         }),
       });
-      expect(screen.getByRole("textbox")).toHaveValue("C\nD");
+      expect(await screen.findByRole("textbox")).toHaveValue("C\nD");
 
       await userEvent.click(screen.getByRole("radio", { name: "Custom list" }));
       expect(screen.getByRole("radio", { name: "Custom list" })).toBeChecked();
@@ -145,7 +152,7 @@ describe("ValuesSourceModal", () => {
         }),
       });
       expect(
-        screen.getByText(/We don’t have any cached values/),
+        await screen.findByText(/We don’t have any cached values/),
       ).toBeInTheDocument();
 
       await userEvent.click(screen.getByRole("radio", { name: "Custom list" }));
@@ -283,12 +290,10 @@ describe("ValuesSourceModal", () => {
         screen.getByRole("radio", { name: "From another model or question" }),
       );
       await userEvent.click(
-        screen.getByRole("button", { name: /Pick a model or question…/ }),
+        screen.getByRole("button", { name: /Pick a model or question/ }),
       );
 
-      expect(
-        screen.getByPlaceholderText("Search for a question or model"),
-      ).toBeInTheDocument();
+      expect(await screen.findByPlaceholderText(/Search…/)).toBeInTheDocument();
     });
 
     it("should display a message when there is an error in the underlying query", async () => {
@@ -406,18 +411,39 @@ const setup = async ({
   hasCollectionAccess = true,
   hasParameterValuesError = false,
 }: SetupOpts = {}) => {
+  const currentUser = createMockUser();
   const databases = [createMockDatabase()];
-  const collections = [createMockCollection(ROOT_COLLECTION)];
+  const rootCollection = createMockCollection(ROOT_COLLECTION);
+  const personalCollection = createMockCollection({
+    id: currentUser.personal_collection_id,
+  });
   const onSubmit = jest.fn();
   const onClose = jest.fn();
 
   setupDatabasesEndpoints(databases);
+  setupSearchEndpoints([]);
+  setupRecentViewsAndSelectionsEndpoints([]);
+  setupCollectionByIdEndpoint({
+    collections: [personalCollection],
+  });
+  setupCollectionItemsEndpoint({
+    collection: personalCollection,
+    collectionItems: [],
+  });
 
   if (hasCollectionAccess) {
-    setupCollectionsEndpoints({ collections });
+    setupCollectionsEndpoints({ collections: [rootCollection] });
     setupCardsEndpoints(cards);
+    cards.forEach(card =>
+      setupTableQueryMetadataEndpoint(
+        createMockTable({
+          id: `card__${card.id}`,
+          fields: card.result_metadata,
+        }),
+      ),
+    );
   } else {
-    setupUnauthorizedCollectionsEndpoints(collections);
+    setupUnauthorizedCollectionsEndpoints([rootCollection]);
     setupUnauthorizedCardsEndpoints(cards);
   }
 
@@ -433,6 +459,7 @@ const setup = async ({
       onSubmit={onSubmit}
       onClose={onClose}
     />,
+    { storeInitialState: { currentUser } },
   );
 
   await waitForLoaderToBeRemoved();

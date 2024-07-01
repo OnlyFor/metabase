@@ -31,6 +31,7 @@ import { getQueryType } from "metabase-lib/v1/parameters/utils/parameter-source"
 import {
   isDateParameter,
   isNumberParameter,
+  isTemporalUnitParameter,
 } from "metabase-lib/v1/parameters/utils/parameter-type";
 import {
   areParameterValuesIdentical,
@@ -40,6 +41,7 @@ import {
 import S from "./ParameterValueWidget.module.css";
 import { ParameterValueWidgetTrigger } from "./ParameterValueWidgetTrigger";
 import ParameterFieldWidget from "./widgets/ParameterFieldWidget/ParameterFieldWidget";
+import { TemporalUnitWidget } from "./widgets/TemporalUnitWidget";
 
 class ParameterValueWidget extends Component {
   static propTypes = {
@@ -135,7 +137,12 @@ class ParameterValueWidget extends Component {
     }
 
     if (!hasNoPopover(this.props.parameter)) {
-      return <WidgetStatusIcon name="chevrondown" />;
+      return (
+        <WidgetStatusIcon
+          name="chevrondown"
+          size={this.props.mimicMantine ? 16 : undefined}
+        />
+      );
     }
   }
 
@@ -236,7 +243,7 @@ class ParameterValueWidget extends Component {
                 size={16}
               />
             )}
-            <div className={cx("mr1", CS.textNoWrap)}>
+            <div className={cx(CS.mr1, CS.textNoWrap)}>
               <FormattedParameterValue
                 parameter={parameter}
                 value={value}
@@ -315,6 +322,17 @@ function Widget({
     );
   }
 
+  if (isTemporalUnitParameter(parameter)) {
+    return (
+      <TemporalUnitWidget
+        parameter={parameter}
+        value={value}
+        setValue={setValue}
+        onClose={onPopoverClose}
+      />
+    );
+  }
+
   if (isTextWidget(parameter)) {
     return (
       <TextWidget
@@ -331,6 +349,7 @@ function Widget({
 
   if (isNumberParameter(parameter)) {
     const arity = getNumberParameterArity(parameter);
+
     return (
       <NumberInputWidget
         value={normalizedValue}

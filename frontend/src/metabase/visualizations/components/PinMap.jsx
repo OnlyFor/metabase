@@ -1,6 +1,6 @@
 /* eslint-disable react/prop-types */
 import cx from "classnames";
-import d3 from "d3";
+import * as d3 from "d3";
 import L from "leaflet";
 import { Component } from "react";
 import { t } from "ttag";
@@ -8,6 +8,7 @@ import _ from "underscore";
 
 import ButtonsS from "metabase/css/components/buttons.module.css";
 import CS from "metabase/css/core/index.css";
+import DashboardS from "metabase/css/dashboard.module.css";
 import { LatitudeLongitudeError } from "metabase/visualizations/lib/errors";
 import { hasLatitudeAndLongitudeColumns } from "metabase-lib/v1/types/utils/isa";
 
@@ -131,9 +132,13 @@ export default class PinMap extends Component {
     ]);
 
     // only use points with numeric coordinates & metric
-    const validPoints = allPoints.map(
-      ([lat, lng, metric]) => lat != null && lng != null && metric != null,
-    );
+    const validPoints = allPoints.map(([lat, lng, metric]) => {
+      if (settings["map.type"] === "pin") {
+        return lat != null && lng != null;
+      }
+
+      return lat != null && lng != null && metric != null;
+    });
     const points = allPoints.filter((_, i) => validPoints[i]);
     const updatedRows = rows.filter((_, i) => validPoints[i]);
 
@@ -186,9 +191,10 @@ export default class PinMap extends Component {
 
     return (
       <div
+        data-element-id="pin-map"
         className={cx(
           className,
-          "PinMap",
+          DashboardS.PinMap,
           CS.relative,
           CS.hoverParent,
           CS.hoverVisibility,
@@ -241,7 +247,7 @@ export default class PinMap extends Component {
                 ButtonsS.ButtonSmall,
                 CS.mb1,
                 {
-                  "PinMapUpdateButton--disabled": disableUpdateButton,
+                  [DashboardS.PinMapUpdateButtonDisabled]: disableUpdateButton,
                 },
               )}
               onClick={this.updateSettings}

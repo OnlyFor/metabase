@@ -7,16 +7,21 @@ import { checkNotNull } from "metabase/lib/types";
 import * as Lib from "metabase-lib";
 import Question from "metabase-lib/v1/Question";
 import type { Card, UnsavedCard } from "metabase-types/api";
+import { createMockCard } from "metabase-types/api/mocks";
 import {
   ORDERS,
-  PRODUCTS,
   ORDERS_ID,
   PEOPLE_ID,
+  PRODUCTS,
   PRODUCTS_ID,
   SAMPLE_DB_ID,
   createAdHocCard,
   createSampleDatabase,
 } from "metabase-types/api/mocks/presets";
+import {
+  createMockQueryBuilderState,
+  createMockState,
+} from "metabase-types/store/mocks";
 
 import { SummarizeSidebar } from "./SummarizeSidebar";
 
@@ -74,7 +79,13 @@ async function setup({
     );
   }
 
-  renderWithProviders(<Wrapper />);
+  renderWithProviders(<Wrapper />, {
+    storeInitialState: createMockState({
+      qb: createMockQueryBuilderState({
+        card: createMockCard(),
+      }),
+    }),
+  });
 
   if (!withDefaultAggregation) {
     const countButton = screen.getByLabelText("Count");
@@ -163,10 +174,9 @@ describe("SummarizeSidebar", () => {
 
   it("should list render the info icon on breakout columns", async () => {
     await setup();
-
-    screen.queryAllByTestId("dimension-list-item").forEach(item => {
-      expect(within(item).getByLabelText("More info")).toBeInTheDocument();
-    });
+    expect(screen.getAllByLabelText("More info").length).toBeGreaterThanOrEqual(
+      1,
+    );
   });
 
   it("shouldn't list breakout columns without an aggregation", async () => {

@@ -4,12 +4,19 @@ import { connect } from "react-redux";
 import { t } from "ttag";
 import _ from "underscore";
 
+import { deletePermanently } from "metabase/archive/actions";
+import { ArchivedEntityBanner } from "metabase/archive/components/ArchivedEntityBanner";
 import ExplicitSize from "metabase/components/ExplicitSize";
 import LoadingAndErrorWrapper from "metabase/components/LoadingAndErrorWrapper";
 import Toaster from "metabase/components/Toaster";
 import CS from "metabase/css/core/index.css";
 import QueryBuilderS from "metabase/css/query_builder.module.css";
-import { rememberLastUsedDatabase } from "metabase/query_builder/actions";
+import Bookmarks from "metabase/entities/bookmarks";
+import Questions from "metabase/entities/questions";
+import {
+  rememberLastUsedDatabase,
+  setArchivedQuestion,
+} from "metabase/query_builder/actions";
 import { SIDEBAR_SIZES } from "metabase/query_builder/constants";
 import { TimeseriesChrome } from "metabase/querying";
 import { Transition } from "metabase/ui";
@@ -25,7 +32,6 @@ import { SnippetSidebar } from "../template_tags/SnippetSidebar";
 import { TagEditorSidebar } from "../template_tags/TagEditorSidebar";
 
 import NewQuestionHeader from "./NewQuestionHeader";
-import NewQuestionView from "./View/NewQuestionView";
 import { NotebookContainer } from "./View/NotebookContainer";
 import {
   BorderedViewTitleHeader,
@@ -61,8 +67,28 @@ class View extends Component {
     } = this.props;
 
     if (isShowingChartSettingsSidebar) {
+      const {
+        question,
+        result,
+        addField,
+        initialChartSetting,
+        onReplaceAllVisualizationSettings,
+        onOpenChartType,
+        visualizationSettings,
+        showSidebarTitle,
+      } = this.props;
       return (
-        <ChartSettingsSidebar {...this.props} onClose={onCloseChartSettings} />
+        <ChartSettingsSidebar
+          question={question}
+          result={result}
+          addField={addField}
+          initialChartSetting={initialChartSetting}
+          onReplaceAllVisualizationSettings={onReplaceAllVisualizationSettings}
+          onOpenChartType={onOpenChartType}
+          visualizationSettings={visualizationSettings}
+          showSidebarTitle={showSidebarTitle}
+          onClose={onCloseChartSettings}
+        />
       );
     }
 
@@ -205,14 +231,28 @@ class View extends Component {
   };
 
   renderHeader = () => {
-    const { question } = this.props;
+    const { question, onUnarchive, onMove, onDeletePermanently } = this.props;
     const query = question.query();
+    const card = question.card();
     const { isNative } = Lib.queryDisplayInfo(query);
 
     const isNewQuestion = !isNative && Lib.sourceTableOrCardId(query) === null;
 
     return (
       <QueryBuilderViewHeaderContainer>
+        {card.archived && (
+          <ArchivedEntityBanner
+            name={card.name}
+            entityType={card.type}
+            canWrite={card.can_write}
+            canRestore={card.can_restore}
+            canDelete={card.can_delete}
+            onUnarchive={() => onUnarchive(question)}
+            onMove={collection => onMove(question, collection)}
+            onDeletePermanently={() => onDeletePermanently(card.id)}
+          />
+        )}
+
         <BorderedViewTitleHeader
           {...this.props}
           style={{
@@ -334,6 +374,14 @@ class View extends Component {
       isShowingToaster,
       isHeaderVisible,
       updateQuestion,
+      reportTimezone,
+      readOnly,
+      isDirty,
+      isRunnable,
+      isResultDirty,
+      hasVisualizeButton,
+      runQuestionQuery,
+      setQueryBuilderMode,
     } = this.props;
 
     // if we don't have a question at all or no databases then we are initializing, so keep it simple
@@ -345,20 +393,10 @@ class View extends Component {
     const { isNative } = Lib.queryDisplayInfo(question.query());
 
     const isNewQuestion = !isNative && Lib.sourceTableOrCardId(query) === null;
+    const isModelOrMetric =
+      question.type() === "model" || question.type() === "metric";
 
-    if (isNewQuestion && queryBuilderMode === "view") {
-      return (
-        <NewQuestionView
-          question={question}
-          updateQuestion={updateQuestion}
-          className={CS.fullHeight}
-        />
-      );
-    }
-
-    const isModel = question.type() === "model";
-
-    if (isModel && queryBuilderMode === "dataset") {
+    if (isModelOrMetric && queryBuilderMode === "dataset") {
       return (
         <>
           <DatasetEditor {...this.props} />
@@ -383,11 +421,21 @@ class View extends Component {
           data-testid="query-builder-root"
         >
           {isHeaderVisible && this.renderHeader()}
+
           <QueryBuilderContentContainer>
             {!isNative && (
               <NotebookContainer
                 isOpen={isNotebookContainerOpen}
-                {...this.props}
+                updateQuestion={updateQuestion}
+                reportTimezone={reportTimezone}
+                readOnly={readOnly}
+                question={question}
+                isDirty={isDirty}
+                isRunnable={isRunnable}
+                isResultDirty={isResultDirty}
+                hasVisualizeButton={hasVisualizeButton}
+                runQuestionQuery={runQuestionQuery}
+                setQueryBuilderMode={setQueryBuilderMode}
               />
             )}
             <ViewSidebar side="left" isOpen={!!leftSidebar}>
@@ -428,6 +476,20 @@ class View extends Component {
 
 const mapDispatchToProps = dispatch => ({
   onSetDatabaseId: id => dispatch(rememberLastUsedDatabase(id)),
+  onUnarchive: async question => {
+    await dispatch(setArchivedQuestion(question, false));
+    await dispatch(Bookmarks.actions.invalidateLists());
+  },
+  onMove: (question, newCollection) =>
+    dispatch(
+      Questions.actions.setCollection({ id: question.id() }, newCollection, {
+        notify: { undo: false },
+      }),
+    ),
+  onDeletePermanently: id => {
+    const deleteAction = Questions.actions.delete({ id });
+    dispatch(deletePermanently(deleteAction));
+  },
 });
 
 export default _.compose(

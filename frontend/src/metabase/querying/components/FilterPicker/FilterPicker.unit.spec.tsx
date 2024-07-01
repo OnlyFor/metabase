@@ -3,7 +3,6 @@ import dayjs from "dayjs";
 
 import { setupFieldsValuesEndpoints } from "__support__/server-mocks";
 import {
-  act,
   renderWithProviders,
   screen,
   waitFor,
@@ -59,9 +58,16 @@ function createQueryWithSegmentFilter() {
   return createFilteredQuery(query, segment);
 }
 
-function createQueryWithCustomFilter() {
+function createQueryWithCustomStringFilter() {
   const query = createQuery();
+  const column = findStringColumn(query);
+  const clause = Lib.expressionClause("is-null", [column], null);
 
+  return createFilteredQuery(query, clause);
+}
+
+function createQueryWithCustomNumberFilter() {
+  const query = createQuery();
   const column1 = findBooleanColumn(query);
   const column2 = findNumericColumn(query);
   const clause = Lib.expressionClause(">", [column1, column2], null);
@@ -405,11 +411,10 @@ describe("FilterPicker", () => {
 
       // The expression editor applies changes on blur,
       // but for some reason it doesn't work without `act`.
-      await act(async () => {
-        await userEvent.clear(input);
-        await userEvent.type(input, text, { delay });
-        await userEvent.tab();
-      });
+
+      await userEvent.clear(input);
+      await userEvent.type(input, text, { delay });
+      await userEvent.tab();
 
       await waitFor(() => expect(button).toBeEnabled());
       await userEvent.click(button);
@@ -419,7 +424,7 @@ describe("FilterPicker", () => {
       const { query, getNextFilter } = setup();
 
       await userEvent.click(screen.getByText(/Custom expression/i));
-      await editExpressionAndSubmit("[[Total] > [[Discount]{enter}");
+      await editExpressionAndSubmit("[[Total] > [[Discount]");
 
       const filter = getNextFilter();
 
@@ -428,8 +433,15 @@ describe("FilterPicker", () => {
       );
     });
 
-    it("should update a filter with a custom expression", async () => {
-      const { query, getNextFilter } = setup(createQueryWithCustomFilter());
+    it("should open the expression editor for unsupported expressions", async () => {
+      setup(createQueryWithCustomStringFilter());
+      expect(screen.getByLabelText("Expression")).toBeInTheDocument();
+    });
+
+    it("should update a filter with a numeric custom expression", async () => {
+      const { query, getNextFilter } = setup(
+        createQueryWithCustomNumberFilter(),
+      );
 
       await editExpressionAndSubmit("{selectall}{backspace}[[Total] > 100", {
         delay: 50,

@@ -188,7 +188,7 @@ const FieldBreadcrumbs = ({
   hasMultipleSchemas,
 }: FieldBreadcrumbsProps) => {
   return (
-    <div className="mb4 pt2 ml-auto mr-auto">
+    <div className={cx(CS.mb4, CS.pt2, CS.mlAuto, CS.mrAuto)}>
       <Breadcrumbs
         crumbs={[
           [database.displayName(), Urls.dataModelDatabase(database.id)],
@@ -234,8 +234,8 @@ export default _.compose(
       include_sensitive_fields: true,
       ...PLUGIN_FEATURE_LEVEL_PERMISSIONS.dataModelQueryProps,
     },
-    fetchType: "fetchMetadata",
-    requestType: "fetchMetadata",
+    fetchType: "fetchMetadataDeprecated",
+    requestType: "fetchMetadataDeprecated",
     selectorName: "getObjectUnfiltered",
   }),
   Fields.load({
@@ -251,8 +251,8 @@ export default _.compose(
       include_sensitive_fields: true,
       ...PLUGIN_FEATURE_LEVEL_PERMISSIONS.dataModelQueryProps,
     },
-    fetchType: "fetchMetadata",
-    requestType: "fetchMetadata",
+    fetchType: "fetchMetadataDeprecated",
+    requestType: "fetchMetadataDeprecated",
     selectorName: "getObjectUnfiltered",
     entityAlias: "foreignKeyTable",
     loadingAndErrorWrapper: false,

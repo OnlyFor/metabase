@@ -37,7 +37,7 @@
   (= (lib.dispatch/dispatch-value x) :mbql/join))
 
 (def ^:private Joinable
-  [:or lib.metadata/TableMetadata ::lib.schema.metadata/card])
+  [:or ::lib.schema.metadata/table ::lib.schema.metadata/card])
 
 (def ^:private JoinOrJoinable
   [:or
@@ -191,7 +191,7 @@
     {:name (or (:alias join) display-name), :display-name display-name}))
 
 (defmethod lib.metadata.calculation/metadata-method :mbql/join
-  [_query _stage-number _query]
+  [_query _stage-number _join-query]
   ;; not i18n'ed because this shouldn't be developer-facing.
   (throw (ex-info "You can't calculate a metadata map for a join! Use lib.metadata.calculation/returned-columns-method instead."
                   {})))
@@ -230,7 +230,7 @@
                       [:alias
                        {:error/message "Join must have an alias to determine column aliases!"}
                        ::lib.schema.common/non-blank-string]]
-   unique-name-fn :- fn?
+   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn
    col            :- :map]
   (assoc col
          :lib/source-column-alias  ((some-fn :lib/source-column-alias :name) col)
@@ -238,11 +238,12 @@
                                                     (:alias join)
                                                     ((some-fn :lib/source-column-alias :name) col)))))
 
-(defmethod lib.metadata.calculation/returned-columns-method :mbql/join
+(mu/defmethod lib.metadata.calculation/returned-columns-method :mbql/join
   [query
    stage-number
    {:keys [fields stages], join-alias :alias, :or {fields :none}, :as join}
-   {:keys [unique-name-fn], :as options}]
+   {:keys [unique-name-fn], :as options} :- [:map
+                                             [:unique-name-fn ::lib.metadata.calculation/unique-name-fn]]]
   (when-not (= fields :none)
     (let [ensure-previous-stages-have-metadata (resolve 'metabase.lib.stage/ensure-previous-stages-have-metadata)
           join-query (cond-> (assoc query :stages stages)
@@ -266,7 +267,7 @@
   "Convenience for calling [[lib.metadata.calculation/visible-columns]] on all of the joins in a query stage."
   [query          :- ::lib.schema/query
    stage-number   :- :int
-   unique-name-fn :- fn?]
+   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
   (into []
         (mapcat (fn [join]
                   (lib.metadata.calculation/visible-columns query
@@ -351,17 +352,6 @@
   (let [conditions (-> (mapv lib.common/->op-arg conditions)
                        (with-join-conditions-add-alias-to-rhses (lib.join.util/current-join-alias a-join)))]
     (u/assoc-dissoc a-join :conditions (not-empty conditions))))
-
-(mu/defn join-clause :- lib.join.util/PartialJoin
-  "Create an MBQL join map from something that can conceptually be joined against. A `Table`? An MBQL or native query? A
-  Saved Question? You should be able to join anything, and this should return a sensible MBQL join map."
-  ([joinable]
-   (-> (join-clause-method joinable)
-       (u/assoc-default :fields :all)))
-
-  ([joinable conditions]
-   (-> (join-clause joinable)
-       (with-join-conditions conditions))))
 
 (mu/defn with-join-fields :- lib.join.util/PartialJoin
   "Update a join (or a function that will return a join) to include `:fields`, either `:all`, `:none`, or a sequence of
@@ -469,8 +459,8 @@
           ;; we leave alone the condition otherwise
           :else &match)))))
 
-(defn- generate-unique-name [base-name taken-names]
-  (let [generator (lib.util/unique-name-generator)]
+(defn- generate-unique-name [metadata-providerable base-name taken-names]
+  (let [generator (lib.util/unique-name-generator (lib.metadata/->metadata-provider metadata-providerable))]
     (run! generator taken-names)
     (generator base-name)))
 
@@ -487,8 +477,8 @@
           home-cols   (lib.metadata.calculation/visible-columns query stage-number stage)
           cond-fields (lib.util.match/match (:conditions a-join) :field)
           home-col    (select-home-column home-cols cond-fields)
-          join-alias  (-> (calculate-join-alias query a-join home-col)
-                          (generate-unique-name (keep :alias (:joins stage))))
+          join-alias  (as-> (calculate-join-alias query a-join home-col) s
+                        (generate-unique-name query s (keep :alias (:joins stage))))
           join-cols   (lib.metadata.calculation/returned-columns
                        (lib.query/query-with-stages query (:stages a-join)))]
       (-> a-join
@@ -501,23 +491,6 @@
 (declare join-conditions
          joined-thing
          suggested-join-conditions)
-
-(mu/defn join :- ::lib.schema/query
-  "Add a join clause to a `query`."
-  ([query a-join]
-   (join query -1 a-join))
-
-  ([query        :- ::lib.schema/query
-    stage-number :- :int
-    a-join       :- [:or lib.join.util/PartialJoin Joinable]]
-   (let [a-join              (join-clause a-join)
-         suggested-conditions (when (empty? (join-conditions a-join))
-                                (suggested-join-conditions query stage-number (joined-thing query a-join)))
-         a-join              (cond-> a-join
-                               (seq suggested-conditions) (with-join-conditions suggested-conditions))
-         a-join              (add-default-alias query stage-number a-join)]
-     (lib.util/update-query-stage query stage-number update :joins (fn [existing-joins]
-                                                                     (conj (vec existing-joins) a-join))))))
 
 (mu/defn joins :- [:maybe ::lib.schema.join/joins]
   "Get all joins in a specific `stage` of a `query`. If `stage` is unspecified, returns joins in the final stage of the
@@ -582,9 +555,42 @@
                  (map raw-join-strategy->strategy-option))
            [:left-join :right-join :inner-join :full-join]))))
 
+(mu/defn join-clause :- lib.join.util/PartialJoin
+  "Create an MBQL join map from something that can conceptually be joined against. A `Table`? An MBQL or native query? A
+  Saved Question? You should be able to join anything, and this should return a sensible MBQL join map. Uses a left join
+  by default."
+  ([joinable]
+   (-> (join-clause-method joinable)
+       (u/assoc-default :fields :all)))
+
+  ([joinable conditions]
+   (join-clause joinable conditions :left-join))
+
+  ([joinable conditions strategy]
+   (-> (join-clause joinable)
+       (with-join-conditions conditions)
+       (with-join-strategy strategy))))
+
+(mu/defn join :- ::lib.schema/query
+  "Add a join clause to a `query`."
+  ([query a-join]
+   (join query -1 a-join))
+
+  ([query        :- ::lib.schema/query
+     stage-number :- :int
+     a-join       :- [:or lib.join.util/PartialJoin Joinable]]
+   (let [a-join              (join-clause a-join)
+         suggested-conditions (when (empty? (join-conditions a-join))
+                                (suggested-join-conditions query stage-number (joined-thing query a-join)))
+         a-join              (cond-> a-join
+                               (seq suggested-conditions) (with-join-conditions suggested-conditions))
+         a-join              (add-default-alias query stage-number a-join)]
+     (lib.util/update-query-stage query stage-number update :joins (fn [existing-joins]
+                                                                     (conj (vec existing-joins) a-join))))))
+
 (mu/defn joined-thing :- [:maybe Joinable]
   "Return metadata about the origin of `a-join` using `metadata-providerable` as the source of information."
-  [metadata-providerable :- lib.metadata/MetadataProviderable
+  [metadata-providerable :- ::lib.schema.metadata/metadata-providerable
    a-join                :- lib.join.util/PartialJoin]
   (let [origin (-> a-join :stages first)]
     (cond
@@ -783,7 +789,9 @@
                                                                  (:id target-column)))
                                                             @target-columns)]
                        (assoc col ::target target-column)))))
-           (lib.metadata.calculation/visible-columns query stage-number source)))))
+           (lib.metadata.calculation/visible-columns query stage-number source
+                                                     {:include-implicitly-joinable?                 false
+                                                      :include-implicitly-joinable-for-source-card? false})))))
 
 (mu/defn suggested-join-conditions :- [:maybe [:sequential {:min 1} ::lib.schema.expression/boolean]] ; i.e., a filter clause
   "Return suggested default join conditions when constructing a join against `joinable`, e.g. a Table, Saved
@@ -791,20 +799,34 @@
   primary key of the thing we're joining (see #31175 for more info); otherwise this will return `nil` if no default
   conditions are suggested."
   ([query joinable]
-   (suggested-join-conditions query -1 joinable))
+   (suggested-join-conditions query -1 joinable nil))
+
+  ([query stage-number joinable]
+   (suggested-join-conditions query stage-number joinable nil))
 
   ([query         :- ::lib.schema/query
     stage-number  :- :int
-    joinable]
-   (let [stage (lib.util/query-stage query stage-number)]
-     (letfn [ ;; only keep one FK to each target column e.g. for
+    joinable
+    position      :- [:maybe :int]]
+   (let [unjoined (if position
+                    ;; Drop this join and any later ones so they won't be used as suggestions.
+                    (let [new-joins (-> (lib.util/query-stage query stage-number)
+                                        :joins
+                                        (subvec 0 position)
+                                        not-empty)]
+                      (lib.util/update-query-stage query stage-number
+                                                   u/assoc-dissoc :joins new-joins))
+                    ;; If this is a new joinable, use the entire current query.
+                    query)
+         stage    (lib.util/query-stage unjoined stage-number)]
+     (letfn [;; only keep one FK to each target column e.g. for
              ;;
              ;;    messages (sender_id REFERENCES user(id),  recipient_id REFERENCES user(id))
              ;;
              ;; we only want join on one or the other, not both, because that makes no sense. However with a composite
              ;; FK -> composite PK suggest multiple conditions. See #34184
              (fks [source target]
-               (->> (fk-columns-to query stage-number source target)
+               (->> (fk-columns-to unjoined stage-number source target)
                     (m/distinct-by #(-> % ::target :id))
                     not-empty))
              (filter-clause [x y]
@@ -827,10 +849,10 @@
                   (filter-clause (::target fk) fk))
                 fks)))))))
 
-(defn- xform-add-join-alias [a-join]
+(defn- xform-add-join-alias [metadata-providerable a-join]
   (let [join-alias (lib.join.util/current-join-alias a-join)]
     (fn [xf]
-      (let [unique-name-fn (lib.util/unique-name-generator)]
+      (let [unique-name-fn (lib.util/unique-name-generator (lib.metadata/->metadata-provider metadata-providerable))]
         (fn
           ([] (xf))
           ([result] (xf result))
@@ -869,7 +891,7 @@
     (into []
           (if a-join
             (comp xform-fix-source-for-joinable-columns
-                  (xform-add-join-alias a-join)
+                  (xform-add-join-alias query a-join)
                   (xform-mark-selected-joinable-columns a-join))
             identity)
           cols)))
@@ -996,4 +1018,4 @@
   [query stage-number _key]
   (some->> (not-empty (joins query stage-number))
            (map #(lib.metadata.calculation/display-name query stage-number %))
-           (str/join " + " )))
+           (str/join " + ")))
